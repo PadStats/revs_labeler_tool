@@ -1,0 +1,1039 @@
+import os
+from dotenv import load_dotenv
+from datetime import datetime
+import requests
+from PIL import Image
+from io import BytesIO
+import time
+import logging
+import base64
+
+import streamlit as st
+
+from labeler_backend import get_repo
+import ui_components as ui
+from labeler_backend.bb_resolver import BackblazeResolverError  # new import
+
+# Constants
+HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "10"))  # How many recent images to show in history
+
+
+# ---------------------------------------------------------------------------
+# Logging setup (console only, keeps GUI clean)
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Session-state helpers
+# ---------------------------------------------------------------------------
+
+
+def _init_state() -> None:
+    if "current_task" not in st.session_state:
+        st.session_state.current_task = None  # type: ignore[assignment]
+    if "completed_stack" not in st.session_state:
+        st.session_state.completed_stack = []  # type: ignore[assignment]
+    if "notes" not in st.session_state:
+        st.session_state.notes = ""
+    if "flagged" not in st.session_state:
+        st.session_state.flagged = False
+    if "skip_label_loading" not in st.session_state:
+        st.session_state.skip_label_loading = False
+    
+    # Initialize cache structure
+    if "task_cache" not in st.session_state:
+        st.session_state.task_cache = {
+            'current_image_id': None,
+            'task_data': None,
+            'labels': None,
+            'ui_state': None,
+            'cached_at': None,
+            'last_accessed': None,
+            'resolved_url': None,  # cached resolved Backblaze URL
+            'image_bytes': None,   # raw bytes of downloaded image
+            'image_meta': None     # (width, height)
+        }
+
+    # Counter to detect widget-triggered reruns (used by cache logic)
+    if "widget_refresh_counter" not in st.session_state:
+        st.session_state.widget_refresh_counter = 0
+
+
+def _update_cache_ui_state(update_timestamp: bool = False) -> None:
+    """Refresh cached ui_state from current session state."""
+    cache = st.session_state.task_cache
+    if cache.get('current_image_id'):
+        cache['ui_state'] = build_complete_ui_state()
+        if update_timestamp:
+            cache['last_accessed'] = time.time()
+        logger.info(f"[CACHE] Hit for image {cache['current_image_id']}")
+
+
+def cache_task_data(image_id: str, task_data: dict, labels: dict, ui_state: dict) -> None:
+    """Cache task data and UI state for the given image."""
+    st.session_state.task_cache = {
+        'current_image_id': image_id,
+        'task_data': task_data,
+        'labels': labels,
+        'ui_state': ui_state,
+        'cached_at': time.time(),
+        'last_accessed': time.time(),
+        'resolved_url': None,  # cached resolved Backblaze URL
+        'image_bytes': None,   # raw bytes of downloaded image
+        'image_meta': None     # (width, height)
+    }
+    logger.info(f"[CACHE] Stored data for image {image_id}")
+
+
+def restore_from_cache(image_id: str) -> bool:
+    """Restore UI state from cache. Returns True if successful, False if cache miss."""
+    cache = st.session_state.task_cache
+    
+    # Check if we have valid cache for this image
+    if (cache.get('current_image_id') == image_id and 
+        cache.get('cached_at') is not None):
+        
+        # Restore UI state from cache
+        ui_state = cache.get('ui_state', {})
+        if ui_state:
+            # Restore session state from cached UI state
+            for key, value in ui_state.items():
+                st.session_state[key] = value
+            _update_cache_ui_state(update_timestamp=True)
+            logger.info(f"[CACHE] Hit for image {image_id}")
+            return True
+    
+    logger.info(f"[CACHE] Miss for image {image_id}")
+    return False
+
+
+def clear_cache() -> None:
+    """Clear the current task cache."""
+    st.session_state.task_cache = {
+        'current_image_id': None,
+        'task_data': None,
+        'labels': None,
+        'ui_state': None,
+        'cached_at': None,
+        'last_accessed': None,
+        'resolved_url': None,  # cached resolved Backblaze URL
+        'image_bytes': None,   # raw bytes of downloaded image
+        'image_meta': None     # (width, height)
+    }
+
+
+def build_complete_ui_state() -> dict:
+    """Build a complete snapshot of the current UI state for caching."""
+    ui_state = {}
+    
+    # Cache all relevant session state
+    cache_keys = [
+        'location_chains', 'notes', 'flagged', 'location_attributes',
+        'condition_scores', 'property_condition_na', 'property_condition_confirmed',
+        'persistent_feature_state', 'persistent_condition_state',
+        'widget_refresh_counter'
+    ]
+    
+    for key in cache_keys:
+        if key in st.session_state:
+            ui_state[key] = st.session_state[key]
+    
+    # Cache feature selections (only if UI components are available)
+    try:
+        leaves = ui.get_leaf_locations()
+        for loc in leaves:
+            if loc not in ui.FEATURE_TAXONOMY:
+                continue
+            for category in ui.FEATURE_TAXONOMY[loc]:
+                na_key = f"na_{loc}_{category}"
+                sel_key = f"sel_{loc}_{category}"
+                if na_key in st.session_state:
+                    ui_state[na_key] = st.session_state[na_key]
+                if sel_key in st.session_state:
+                    ui_state[sel_key] = st.session_state[sel_key]
+    except (AttributeError, NameError):
+        # UI components not available yet, skip feature caching
+        pass
+    
+    return ui_state
+
+
+def update_cache_with_saved_data(image_id: str, saved_labels: dict) -> None:
+    """Update cache with newly saved label data."""
+    cache = st.session_state.task_cache
+    if cache.get('current_image_id') == image_id:
+        cache['labels'] = saved_labels
+        cache['ui_state'] = build_complete_ui_state()
+        cache['last_accessed'] = time.time()
+        logger.info(f"[CACHE] Updated after save for image {image_id}")
+
+
+def show_username_gate():
+    """Show username input gate before proceeding to main app."""
+    st.set_page_config(page_title="Property Labeler – Welcome", layout="wide")
+    
+    st.title("🏠 Property Image Labeling Tool")
+    st.markdown("### Welcome! Please enter your username to continue.")
+    st.markdown("Your username will be used to track your progress and lock tasks.")
+    
+    # Center the input
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        username = st.text_input("Your username:", key="temp_username", placeholder="Enter your username")
+        
+        if st.button("Continue", disabled=not username, use_container_width=True):
+            if username.strip():  # Ensure it's not just whitespace
+                st.session_state.username = username.strip()
+                st.rerun()  # Restart main() with username set
+
+
+# ---------------------------------------------------------------------------
+# One-time environment loading (prevents re-parsing .env on every rerun)
+# ---------------------------------------------------------------------------
+
+
+@st.cache_resource  # runs once per browser session
+def _load_env() -> None:
+    """Load .env only once per Streamlit session."""
+    load_dotenv()
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:  # noqa: C901
+    """Slimmed-down but functional prototype using LabelRepo."""
+
+    _init_state()  # Initialize our custom session state
+    ui.init_session_state()
+
+    # Load environment variables (cached so we do not redo I/O every rerun)
+    _load_env()
+
+    # Username gate check - must have valid username before proceeding
+    if "username" not in st.session_state or not st.session_state.username:
+        show_username_gate()
+        return
+
+    # ---------------------------------------------------------------
+    # Cache the LabelRepo so we do NOT rebuild a Firestore client on
+    # every Streamlit rerun (which causes perceptible UI lag).
+    # ---------------------------------------------------------------
+
+    mode = os.getenv("LABEL_REPO", "dev")
+
+    # Build the repo only once per Streamlit session and reuse it.
+    # We keep the selected mode alongside to allow hot-switching if
+    # the env var changes while the session is running (unlikely but
+    # prevents stale caching during development).
+    if (
+        "repo" not in st.session_state  # first run
+        or st.session_state.get("repo_mode") != mode  # mode changed
+    ):
+        st.session_state.repo = get_repo(mode)
+        st.session_state.repo_mode = mode
+
+    repo = st.session_state.repo  # type: ignore[assignment]
+
+    # Note: Removed st.on_session_end() as it's not available in current Streamlit version
+    # Task cleanup will be handled differently - tasks will be released when user navigates away
+    # or when the session naturally ends (Firestore has timeout reclaim for stale locks)
+
+    st.set_page_config(page_title="Property Labeler – prototype", layout="wide")
+    st.title("🏠 Property Image Labeling Tool – prototype")
+
+    # Show current username with option to change
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        new_username = st.text_input("Your username:", value=st.session_state.username)
+    with col2:
+        if st.button("Update Username"):
+            if new_username.strip() and new_username != st.session_state.username:
+                # Clear current task and restart
+                st.session_state.username = new_username.strip()
+                st.session_state.current_task = None
+                st.session_state.completed_stack = []
+                clear_cache()  # Clear cache when username changes
+                st.rerun()
+    
+    # Use session username for all operations
+    user_id = st.session_state.username
+
+    # 1️⃣ acquire or resume a task ------------------------------------------------
+    task = st.session_state.current_task
+    if task is None:
+        # first check if we already have a pre-loaded history stack
+        hist_stack: list = st.session_state.get("history_stack", [])  # type: ignore[var-annotated]
+        if hist_stack:
+            task = hist_stack.pop(0)
+            st.session_state.history_stack = hist_stack
+            st.session_state.current_task = task
+        else:
+            task = repo.get_next_task(user_id)
+            if task is None:
+                # nothing in progress – fall back to labeled history
+                history = repo.get_user_history(user_id, limit=HISTORY_LIMIT)
+                if history:
+                    st.session_state.history_stack = history[1:]
+                    task = history[0]
+                    st.session_state.current_task = task
+                else:
+                    st.success("🎉 No more images to label.")
+                    return
+
+    # ---- Load task data and rebuild session state with caching ----
+    if task is not None and (st.session_state.get("_last_loaded_id") != task["image_id"]):
+        image_id = task["image_id"]
+        
+        # Try to restore from cache first
+        if restore_from_cache(image_id):
+            # Successfully restored from cache - no Firestore calls needed
+            st.session_state._last_loaded_id = image_id
+        else:
+            # Cache miss - load from Firestore and cache the data
+            logger.info(f"[FS] Loading labels for image {image_id}")
+            existing = repo.load_labels(image_id)
+            st.session_state._last_loaded_id = image_id
+
+        if existing:
+            ui.reset_session_state_to_defaults()
+
+            # Spatial chains
+            raw_spatial = existing.get("spatial_labels", [])
+            if isinstance(raw_spatial, str):
+                labels_list = [s for s in raw_spatial.split("|") if s]
+            else:
+                labels_list = raw_spatial
+
+            st.session_state.location_chains = (
+                ui.label_strings_to_chains(labels_list) if labels_list else [{}]
+            )
+
+            # Notes & flag
+            st.session_state.notes = existing.get("notes", "")
+            st.session_state.flagged = bool(existing.get("flagged", False))
+
+            # Feature selections
+            st.session_state.persistent_feature_state = {}
+            features_raw = existing.get("feature_labels", [])
+            if isinstance(features_raw, str):
+                feature_set = set(features_raw.split("|")) if features_raw else set()
+            else:
+                feature_set = set(features_raw)
+            for loc in ui.get_leaf_locations():
+                if loc not in ui.FEATURE_TAXONOMY:
+                    continue
+                for category, feats in ui.FEATURE_TAXONOMY[loc].items():
+                    sel = [f for f in feature_set if f in feats]
+                    st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = not bool(sel)
+                    st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = sel
+
+            # Attributes
+            st.session_state.location_attributes = {}
+            attrs_map = existing.get("attributes", {})
+            if isinstance(attrs_map, dict):
+                for attr, pipe in attrs_map.items():
+                    for part in pipe.split("|"):
+                        if ":" not in part:
+                            continue
+                        leaf, val = part.split(":", 1)
+                        for idx, chain in enumerate(st.session_state.location_chains):
+                            path = list(chain.values())
+                            if not path:
+                                continue
+                            leaf_name = path[-1] if path[-1] != "N/A" else path[-2]
+                            if leaf_name == leaf:
+                                key = f"loc_{idx}_{leaf}"
+                                st.session_state.location_attributes.setdefault(key, {})[attr] = val
+
+            # Condition scores
+            cond = existing.get("condition_scores", {})
+
+            if isinstance(cond, dict):
+                # New schema: condition_scores as object
+                prop_val = cond.get("property_condition", 3.0)
+                if prop_val is None:
+                    st.session_state.condition_scores = {
+                        "property_condition": 3.0,
+                        "quality_of_construction": cond.get("quality_of_construction", ""),
+                        "improvement_condition": cond.get("improvement_condition", ""),
+                    }
+                    st.session_state.property_condition_na = True
+                    st.session_state.property_condition_confirmed = False
+                else:
+                    st.session_state.condition_scores = {
+                        "property_condition": float(prop_val),
+                        "quality_of_construction": cond.get("quality_of_construction", ""),
+                        "improvement_condition": cond.get("improvement_condition", ""),
+                    }
+                    st.session_state.property_condition_na = False
+                    st.session_state.property_condition_confirmed = True
+
+                st.session_state.persistent_condition_state = {
+                    "property_condition": st.session_state.condition_scores["property_condition"],
+                    "quality_of_construction": st.session_state.condition_scores["quality_of_construction"],
+                    "improvement_condition": st.session_state.condition_scores["improvement_condition"],
+                    "property_confirmed": st.session_state.property_condition_confirmed,
+                }
+
+            elif "condition_score" in existing:
+                # Legacy schema: single field condition_score
+                prop_val = existing["condition_score"]
+                if prop_val is None:
+                    st.session_state.condition_scores = {
+                        "property_condition": 3.0,
+                        "quality_of_construction": "",
+                        "improvement_condition": "",
+                    }
+                    st.session_state.property_condition_na = True
+                    st.session_state.property_condition_confirmed = False
+                else:
+                    st.session_state.condition_scores = {
+                        "property_condition": float(prop_val),
+                        "quality_of_construction": "",
+                        "improvement_condition": "",
+                    }
+                    st.session_state.property_condition_na = False
+                    st.session_state.property_condition_confirmed = True
+
+                st.session_state.persistent_condition_state = {
+                    "property_condition": st.session_state.condition_scores["property_condition"],
+                    "quality_of_construction": "",
+                    "improvement_condition": "",
+                    "property_confirmed": st.session_state.property_condition_confirmed,
+                }
+
+            # Increment/initialise widget refresh counter and cache data
+            st.session_state.widget_refresh_counter += 1
+
+            ui_state = build_complete_ui_state()
+            cache_task_data(image_id, task, existing, ui_state)
+
+        else:
+            # No existing labels document – start with defaults and cache blank label set
+            ui.reset_session_state_to_defaults()
+
+            # If the task document has a condition_score field, seed it
+            if "condition_score" in task:
+                prop_val = task["condition_score"]
+                if prop_val is None:
+                    st.session_state.condition_scores = {
+                        "property_condition": 3.0,
+                        "quality_of_construction": "",
+                        "improvement_condition": "",
+                    }
+                    st.session_state.property_condition_na = True
+                    st.session_state.property_condition_confirmed = False
+                else:
+                    st.session_state.condition_scores = {
+                        "property_condition": float(prop_val),
+                        "quality_of_construction": "",
+                        "improvement_condition": "",
+                    }
+                    st.session_state.property_condition_na = False
+                    st.session_state.property_condition_confirmed = False
+
+                st.session_state.persistent_condition_state = {
+                    "property_condition": st.session_state.condition_scores["property_condition"],
+                    "quality_of_construction": "",
+                    "improvement_condition": "",
+                    "property_confirmed": False,
+                }
+
+            # Cache the loaded data (empty labels)
+            st.session_state.widget_refresh_counter += 1
+            ui_state = build_complete_ui_state()
+            cache_task_data(image_id, task, {}, ui_state)
+
+    st.markdown(
+        f"**Repo mode:** `{mode}` | **image_id:** `{task['image_id']}` | status: {task['status']}"
+    )
+
+    # Refresh cached ui_state snapshot (no GUI output)
+    _update_cache_ui_state(update_timestamp=True)
+
+    # Optional: log cache hit status for this image (after UI built, before debug panel)
+    cache = st.session_state.task_cache
+    hit = cache.get('current_image_id') == task['image_id']
+    logger.info(f"[CACHE] {'Hit' if hit else 'Miss'} for image {task['image_id']}")
+
+    # Store cache info for later rendering at very bottom
+    cache_debug_info = {
+        "cache": cache,
+        "hit": hit,
+    }
+
+    # 2️⃣ display image ----------------------------------------------------------
+    image_displayed = False
+
+    cache_entry = st.session_state.task_cache
+
+    # ------------------------------------------------------------------
+    # Resolve image URL (cached)
+    # ------------------------------------------------------------------
+    resolved_url: str | None = None
+    if cache_entry.get('current_image_id') == task['image_id']:
+        resolved_url = cache_entry.get('resolved_url')
+
+    if resolved_url is None:
+        try:
+            resolved_url = repo.get_image_url(task)
+            cache_entry['resolved_url'] = resolved_url
+            logger.info(f"[CACHE] Stored resolved URL for {task['image_id']}")
+        except Exception as e:
+            logger.warning(f"API resolver failed: {e}")
+
+    # Candidate sources (resolved URL first, fallback to raw image_url)
+    image_sources: list[tuple[str, str]] = []
+    if resolved_url:
+        image_sources.append(("API Endpoint", resolved_url))
+
+    if task.get('image_url'):
+        image_sources.append(("Raw URL", task['image_url']))
+    else:
+        st.warning("⚠️ No raw image_url available in task")
+
+    # ------------------------------------------------------------------
+    # Use cached image bytes if present
+    # ------------------------------------------------------------------
+    if (
+        cache_entry.get('current_image_id') == task['image_id']
+        and cache_entry.get('image_b64')
+        and cache_entry.get('image_meta')
+    ):
+        b64: str = cache_entry['image_b64']  # type: ignore[assignment]
+        w, h = cache_entry['image_meta']
+        logger.info("[PERF] base64 path used")
+        html = _html_image_from_b64(b64, w, h, "Cache", task['image_id'])
+        st.markdown(html, unsafe_allow_html=True)
+        image_displayed = True
+    else:
+        # Try each image source and cache the first successful bytes download
+        for source_name, url in image_sources:
+            try:
+                response = requests.get(url, timeout=2)
+                response.raise_for_status()
+                content_type = response.headers.get('content-type', '')
+                if not content_type.startswith('image/'):
+                    raise ValueError(f"URL returned non-image content: {content_type}")
+                img_bytes = response.content
+                img = Image.open(BytesIO(img_bytes))
+
+                # Pre-compute & store heavy transforms once
+                img_b64 = base64.b64encode(img_bytes).decode()
+
+                html = _html_image_from_b64(img_b64, img.size[0], img.size[1], source_name, task['image_id'])
+                st.markdown(html, unsafe_allow_html=True)
+                image_displayed = True
+
+                # Cache bytes & meta for future reruns
+                cache_entry['image_bytes'] = img_bytes
+                cache_entry['image_meta'] = img.size
+                cache_entry['image_b64'] = img_b64
+                logger.info(f"[CACHE] Stored image bytes for {task['image_id']}")
+                break
+            except requests.HTTPError as http_err:
+                st.warning(f"HTTP error for {source_name}: {http_err}")
+                continue  # Try next source
+            except Exception as e:
+                st.warning(f"⚠️ Responsive sizing failed for {source_name}, trying simple display: {e}")
+                try:
+                    st.image(url, use_container_width=True)
+                    st.success(f"✅ Successfully displayed image via {source_name} (simple mode)")
+                    image_displayed = True
+                    break
+                except Exception as e:
+                    st.error(f"❌ Failed to display image via {source_name}: {e}")
+                    continue
+    
+    # If no image sources worked, allow user to skip
+    if not image_displayed:
+        st.error("❌ Unable to load image from any source")
+        st.markdown("**Available image sources:**")
+        for source_name, url in image_sources:
+            st.markdown(f"- {source_name}: `{url}`")
+        
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("🔄 Retry Image Loading", use_container_width=True):
+                st.rerun()
+        with col2:
+            if st.button("⏭️ Skip This Image", use_container_width=True, type="primary"):
+                # Mark as flagged and move to next
+                st.session_state.flagged = True
+                # Save current state (even if minimal) and move to next
+                try:
+                    payload = _build_payload()
+                    logger.info(f"[FS] Saving labels for image {task['image_id']} (skip)")
+                    repo.save_labels(task["image_id"], payload, user_id)
+                    # Update cache with saved data
+                    update_cache_with_saved_data(task["image_id"], payload)
+                except:
+                    pass  # Even if save fails, continue
+                # Clear cache for new image
+                clear_cache()
+                st.session_state.completed_stack.append(task)
+                st.session_state.current_task = None  # triggers get_next_task on rerun
+                st.rerun()
+        
+        st.stop()  # Don't proceed with the rest of the app
+
+    # ------------------------------------------------------------------
+    # Restore feature state EARLY - before UI
+    # ------------------------------------------------------------------
+    leaves = ui.get_leaf_locations()
+    if leaves:
+        # Restore feature state when locations are available
+        for loc in leaves:
+            if loc not in ui.FEATURE_TAXONOMY:
+                continue
+            for category in ui.FEATURE_TAXONOMY[loc]:
+                na_key = f"na_{loc}_{category}"
+                sel_key = f"sel_{loc}_{category}"
+                
+                # Restore from persistent storage only if not already in session state
+                persistent_na_key = f"persistent_na_{loc}_{category}"
+                persistent_sel_key = f"persistent_sel_{loc}_{category}"
+                
+                if na_key not in st.session_state and persistent_na_key in st.session_state.persistent_feature_state:
+                    st.session_state[na_key] = st.session_state.persistent_feature_state[persistent_na_key]
+                if sel_key not in st.session_state and persistent_sel_key in st.session_state.persistent_feature_state:
+                    st.session_state[sel_key] = st.session_state.persistent_feature_state[persistent_sel_key]
+
+    # Restore attribute state EARLY as well (from legacy)
+    ui.restore_attribute_state()
+
+    # Restore condition state EARLY as well (from legacy)
+    ui.restore_condition_state()
+
+    # Navigation buttons (moved above current selections - from legacy)
+    nav_left, nav_prev, nav_next, nav_right = st.columns([3, 1, 1, 3], gap="small")
+
+    # Check validation status AFTER state restoration
+    can_proceed = ui.can_move_on()
+
+    with nav_prev:
+        disabled = len(st.session_state.completed_stack) == 0
+        if st.button("⬅️ Previous",
+                     use_container_width=True,
+                     disabled=disabled,
+                     key="btn_prev"):
+            # Clear cache when moving to different image
+            clear_cache()
+            st.session_state.current_task = st.session_state.completed_stack.pop()
+            st.rerun()
+
+    with nav_next:
+        if st.button("➡️ Next",
+                     use_container_width=True,
+                     disabled=not can_proceed,
+                     key="btn_next"):
+            # Save current task first
+            payload = _build_payload()
+            logger.info(f"[FS] Saving labels for image {task['image_id']} (Go)")
+            repo.save_labels(task["image_id"], payload, user_id)
+            # Update cache with saved data
+            update_cache_with_saved_data(task["image_id"], payload)
+            st.session_state.completed_stack.append(task)
+
+            # Clear cache when moving to different image
+            clear_cache()
+
+            # Decide where the next task comes from
+            hist_stack = st.session_state.get("history_stack", [])  # type: ignore[var-annotated]
+            if hist_stack:
+                st.session_state.current_task = hist_stack.pop(0)
+                st.session_state.history_stack = hist_stack
+            else:
+                st.session_state.current_task = None  # triggers get_next_task on rerun
+
+            st.rerun()
+
+    # Current Selections Display (from legacy)
+    sel_left, sel_mid, sel_right = st.columns([1, 4, 1], gap="small")
+    complete = ui.get_complete_chains()
+
+    # Get features from current session state (after restoration)
+    feats_by_loc = {}
+    for loc in sorted(leaves):
+        feats = []
+        if loc in ui.FEATURE_TAXONOMY:
+            for category in ui.FEATURE_TAXONOMY[loc]:
+                sel_key = f"sel_{loc}_{category}"
+                feats.extend(st.session_state.get(sel_key, []))
+        feats_by_loc[loc] = feats
+
+    groups = list(feats_by_loc.items())
+
+    with sel_mid:
+        with st.expander("📋 Current Selections", expanded=True):
+            loc_col, feat_col = st.columns([1, 1], gap="medium")
+
+            # Left: Locations
+            with loc_col:
+                st.subheader("Locations")
+                if complete:
+                    for chain in complete:
+                        st.write("• " + " → ".join(chain))
+                else:
+                    st.write("_(none selected)_")
+
+            # Right: Features grid (cached HTML)
+            with feat_col:
+                st.subheader("Features")
+
+                # Hash current selections for change detection
+                feature_hash = "|".join(
+                    f"{loc}:{','.join(sorted(feats))}" for loc, feats in sorted(feats_by_loc.items()) if feats
+                )
+
+                if not feature_hash:
+                    st.write("_(no features yet)_")
+                else:
+                    # Rebuild table only if selections changed
+                    if cache_entry.get('feature_table_hash') != feature_hash:
+                        logger.info("[PERF] feature table rebuilt")
+                        headers = "".join(
+                            f"<th style='text-align:left; padding:4px'>{loc}</th>"
+                            for loc, feats in groups if feats
+                        )
+                        filtered_groups = [(loc, feats) for loc, feats in groups if feats]
+                        max_rows = max(len(feats) for _, feats in filtered_groups)
+                        rows_html = ""
+                        for i in range(max_rows):
+                            row_cells = ""
+                            for _, feats in filtered_groups:
+                                if i < len(feats):
+                                    row_cells += (
+                                        "<td style='text-align:left; padding:2px'>"
+                                        f"• {feats[i]}"
+                                        "</td>"
+                                    )
+                                else:
+                                    row_cells += "<td></td>"
+                            rows_html += f"<tr>{row_cells}</tr>"
+
+                        table_html = (
+                            "<table style='width:100%; border-collapse: collapse;'>"
+                            f"<tr>{headers}</tr>"
+                            f"{rows_html}"
+                            "</table>"
+                        )
+
+                        cache_entry['feature_table_html'] = table_html
+                        cache_entry['feature_table_hash'] = feature_hash
+                    else:
+                        table_html = cache_entry['feature_table_html']
+
+                    st.markdown(table_html, unsafe_allow_html=True)
+
+            # -------------------- Attributes --------------------
+            st.subheader("Attributes")
+
+            # Build hash for attribute selections
+            attr_hash = hash(str(st.session_state.location_attributes))
+
+            if not st.session_state.location_attributes:
+                st.write("_(no attributes yet)_")
+            else:
+                if cache_entry.get('attr_table_hash') != attr_hash:
+                    logger.info("[PERF] attribute table rebuilt")
+                    attr_table_html = "<table style='width:100%; border-collapse: collapse;'>"
+                    attr_table_html += "<tr><th style='text-align:left; padding:4px'>Location</th><th style='text-align:left; padding:4px'>Attribute</th><th style='text-align:left; padding:4px'>Value</th></tr>"
+
+                    for location_key, attrs in st.session_state.location_attributes.items():
+                        if not attrs:
+                            continue
+                        loc_parts = location_key.split('_', 2)
+                        if len(loc_parts) < 3:
+                            continue
+                        location_name = loc_parts[2]
+
+                        for attr, value in attrs.items():
+                            if value:
+                                attr_display = attr.replace("_", " ").title()
+                                attr_table_html += (
+                                    f"<tr><td style='text-align:left; padding:2px'>{location_name}</td>"
+                                    f"<td style='text-align:left; padding:2px'>{attr_display}</td>"
+                                    f"<td style='text-align:left; padding:2px'>{value}</td></tr>"
+                                )
+
+                    attr_table_html += "</table>"
+
+                    cache_entry['attr_table_html'] = attr_table_html
+                    cache_entry['attr_table_hash'] = attr_hash
+                st.markdown(cache_entry['attr_table_html'], unsafe_allow_html=True)
+
+            # ---------------- Condition Scores ------------------
+            st.subheader("Condition Scores")
+
+            cond = st.session_state.condition_scores  # type: ignore[attr-defined]
+
+            # Build stable hash string so equality survives reruns
+            na_flag = bool(st.session_state.get("property_condition_na", False))
+            prop_score_val = round(cond["property_condition"], 3)
+            quality_val = cond["quality_of_construction"] or ""
+            improvement_val = cond["improvement_condition"] or ""
+
+            cs_state = f"{na_flag}|{prop_score_val:.3f}|{quality_val}|{improvement_val}"
+
+            if cache_entry.get('cond_scores_hash') != cs_state:
+                logger.info("[PERF] condition table rebuilt")
+                scores_table_html = "<table style='width:100%; border-collapse: collapse;'>"
+                scores_table_html += "<tr><th style='text-align:left; padding:4px'>Category</th><th style='text-align:left; padding:4px'>Score/Selection</th></tr>"
+
+                prop_score = st.session_state.condition_scores['property_condition']
+                if st.session_state.get("property_condition_na", False):
+                    scores_table_html += (
+                        "<tr><td style='text-align:left; padding:2px'>Property Condition</td>"
+                        "<td style='text-align:left; padding:2px'>N/A (N/A)</td></tr>"
+                    )
+                else:
+                    score_interpretation = {
+                        **{k: "Excellent" for k in [round(x/10,1) for x in range(10,20)]},
+                        **{k: "Good" for k in [round(x/10,1) for x in range(20,30)]},
+                        **{k: "Average" for k in [round(x/10,1) for x in range(30,40)]},
+                        **{k: "Fair" for k in [round(x/10,1) for x in range(40,50)]},
+                        5.0: "Poor",
+                    }
+                    closest = min(score_interpretation, key=lambda x: abs(x - prop_score))
+                    interp = score_interpretation[closest]
+                    scores_table_html += (
+                        f"<tr><td style='text-align:left; padding:2px'>Property Condition</td>"
+                        f"<td style='text-align:left; padding:2px'>{prop_score:.3f} ({interp})</td></tr>"
+                    )
+
+                quality_display = st.session_state.condition_scores["quality_of_construction"] or "Not Selected"
+                scores_table_html += (
+                    f"<tr><td style='text-align:left; padding:2px'>Quality of Construction</td>"
+                    f"<td style='text-align:left; padding:2px'>{quality_display}</td></tr>"
+                )
+
+                improvement_display = st.session_state.condition_scores["improvement_condition"] or "Not Selected"
+                scores_table_html += (
+                    f"<tr><td style='text-align:left; padding:2px'>Improvement Condition</td>"
+                    f"<td style='text-align:left; padding:2px'>{improvement_display}</td></tr>"
+                )
+
+                scores_table_html += "</table>"
+
+                cache_entry['cond_scores_html'] = scores_table_html
+                cache_entry['cond_scores_hash'] = cs_state
+
+            st.markdown(cache_entry['cond_scores_html'], unsafe_allow_html=True)
+
+    # ---------- save helper (moved here so it's available for all buttons)
+    def _build_payload() -> dict:  # noqa: D401
+        # --- spatial labels ---
+        spatial_list = ui.chains_to_label_strings()
+
+        # --- feature labels ---
+        feature_set: set[str] = set()
+        leaves = ui.get_leaf_locations()
+        for loc in leaves:
+            if loc not in ui.FEATURE_TAXONOMY:
+                continue
+            for category in ui.FEATURE_TAXONOMY[loc]:
+                sel_key = f"sel_{loc}_{category}"
+                selections = st.session_state.get(sel_key, [])  # type: ignore[arg-type]
+                feature_set.update(selections)
+
+        # --- contextual attributes ---
+        attributes_map: dict[str, str] = {}
+        for attr in ui.LOCATION_TAXONOMY.get("attributes", {}):
+            attr_values = []
+            for loc_key, attrs in st.session_state.location_attributes.items():  # type: ignore[attr-defined]
+                if attr in attrs and attrs[attr]:
+                    # key format loc_<idx>_<leaf>
+                    leaf_name = loc_key.split("_", 2)[-1]
+                    attr_values.append(f"{leaf_name}:{attrs[attr]}")
+            if attr_values:
+                attributes_map[attr] = "|".join(attr_values)
+
+        # --- condition scores ---
+        cond = st.session_state.condition_scores  # type: ignore[attr-defined]
+        condition_scores = {
+            "property_condition": None if st.session_state.get("property_condition_na", False) else cond["property_condition"],
+            "quality_of_construction": cond["quality_of_construction"],
+            "improvement_condition": cond["improvement_condition"],
+        }
+
+        return {
+            "notes": st.session_state.notes,
+            "flagged": st.session_state.flagged,
+            "schema_version": 1,
+            "spatial_labels": spatial_list,  # list[str]
+            "feature_labels": sorted(feature_set),  # list[str]
+            "attributes": attributes_map,
+            "condition_scores": condition_scores,
+        }
+
+    # Clear/Save buttons - recalculate validation for buttons that may be affected by UI interactions (from legacy)
+    cs_left, cs_clear, cs_save, cs_right = st.columns([3, 1, 1, 3], gap="small")
+
+    with cs_clear:
+        if st.button("🗑️ Clear Labels",
+                     use_container_width=True,
+                     key="btn_clear"):
+            ui.reset_session_state_to_defaults()
+            st.session_state.skip_label_loading = True
+            st.rerun()
+
+    # Recalculate validation for Save button in case UI interactions have changed state
+    current_validation = ui.can_move_on()
+    
+    with cs_save:
+        if st.button("💾 Save Labels",
+                     type="primary",
+                     use_container_width=True,
+                     disabled=not current_validation,
+                     key="btn_save"):
+            payload = _build_payload()
+            logger.info(f"[FS] Saving labels for image {task['image_id']}")
+            repo.save_labels(task["image_id"], payload, user_id)
+            # Update cache with saved data
+            update_cache_with_saved_data(task["image_id"], payload)
+            st.success("Saved ✔︎")
+
+    # Flag for Review button (centered) - from legacy
+    flag_left, flag_center, flag_right = st.columns([2, 1, 2], gap="small")
+    with flag_center:
+        flag_text = "🚩 Unflag" if st.session_state.flagged else "🚩 Flag for Review"
+        flag_type = "secondary" if st.session_state.flagged else "primary"
+        if st.button(flag_text,
+                     type=flag_type,
+                     use_container_width=True,
+                     key="btn_flag"):
+            st.session_state.flagged = not st.session_state.flagged
+            st.rerun()
+
+    # Refresh button - force reload from Firestore
+    refresh_left, refresh_center, refresh_right = st.columns([2, 1, 2], gap="small")
+    with refresh_center:
+        if st.button("🔄 Refresh from Firestore", 
+                     type="secondary",
+                     use_container_width=True,
+                     key="btn_refresh"):
+            # Force reload from Firestore by clearing cache
+            clear_cache()
+            st.session_state._last_loaded_id = None  # Force reload
+            st.rerun()
+
+    # ------------------------------------------------------------------
+    # Complex widgets imported from legacy via ui_components -------------
+    # ------------------------------------------------------------------
+
+    col_left, col_mid, col_right = st.columns([1.0, 1.0, 1.0])
+    with col_left:
+        ui.build_dropdown_cascade_ui()
+    with col_mid:
+        ui.build_feature_ui()
+    with col_right:
+        ui.build_contextual_attribute_ui()
+
+    st.markdown("---")
+    ui.build_condition_scores_ui()
+
+    # Additional Information
+    st.subheader("📝 Additional Information")
+    st.session_state.notes = st.text_area("Notes", value=st.session_state.notes, height=80)
+
+    # Go-to-page - recalculate validation for final buttons (from legacy)
+    final_validation = ui.can_move_on()
+    
+    go_left, go_mid, go_right = st.columns([3, 1, 3], gap="small")
+    with go_mid:
+        goto = st.number_input(
+            "Go to page",
+            min_value=1,
+            max_value=1000,  # We don't know the total count in repo mode, so use a reasonable max
+            value=1,  # Default to 1 since we don't have an index
+            step=1,
+            key="goto_input_bottom",
+            label_visibility="collapsed"
+        )
+        if st.button("🔎 Go", 
+                     use_container_width=True, 
+                     disabled=not final_validation,
+                     key="btn_goto_bottom"):
+            # Save current task first
+            payload = _build_payload()
+            logger.info(f"[FS] Saving labels for image {task['image_id']} (Go)")
+            repo.save_labels(task["image_id"], payload, user_id)
+            # Update cache with saved data
+            update_cache_with_saved_data(task["image_id"], payload)
+            # Clear cache for new image
+            clear_cache()
+            st.session_state.current_task = None  # triggers get_next_task on rerun
+            st.rerun()
+
+    # Render cache debug panel at bottom
+    with st.container():
+        with st.expander("🗄️ Cache Debug", expanded=False):
+            st.json(cache_debug_info["cache"], expanded=False)
+            st.write("**Cache Hit:**", cache_debug_info["hit"])
+            c = cache_debug_info["cache"]
+            if c.get('cached_at'):
+                st.write("**Cache Age:**", f"{time.time() - c['cached_at']:.1f}s")
+            if c.get('last_accessed'):
+                st.write("**Last Accessed:**", f"{time.time() - c['last_accessed']:.1f}s ago")
+
+    # Debug: Show task document structure (temporary)
+    st.markdown("---")
+    st.markdown(f"**Debug - Task keys:** `{list(task.keys())}`")
+    st.markdown(f"**Debug - bb_url:** `{repr(task.get('bb_url'))}`")
+    
+    potential_url_fields = ['backblaze_url', 'image_url', 'url', 'path', 'file_path', 'storage_path']
+    for field in potential_url_fields:
+        if field in task:
+            st.markdown(f"**Debug - {field}:** `{repr(task.get(field))}`")
+
+
+# ---------------------------------------------------------------------------
+# Helper: build centered HTML when base64 already available (no re-encode)
+# ---------------------------------------------------------------------------
+
+
+def _html_image_from_b64(
+    img_b64: str,
+    img_width: int,
+    img_height: int,
+    source: str,
+    image_id: str,
+) -> str:
+    """Return HTML snippet using a pre-computed base64 string."""
+
+    MIN_W, MAX_W, MIN_H, MAX_H = 800, 1200, 800, 1200
+    disp_w, disp_h = img_width, img_height
+
+    if disp_w < MIN_W:
+        f = MIN_W / disp_w
+        disp_w, disp_h = MIN_W, int(disp_h * f)
+    if disp_w > MAX_W:
+        f = MAX_W / disp_w
+        disp_w, disp_h = MAX_W, int(disp_h * f)
+    if disp_h > MAX_H:
+        f = MAX_H / disp_h
+        disp_h, disp_w = MAX_H, int(disp_w * f)
+    if disp_h < MIN_H:
+        f = MIN_H / disp_h
+        disp_h, disp_w = MIN_H, int(disp_w * f)
+
+    return (
+        f"<div style='display:flex;justify-content:center;align-items:center;width:100%;margin:20px 0;'>"
+        f"<div style='text-align:center;'>"
+        f"<img src='data:image/jpeg;base64,{img_b64}' "
+        f"style='width:{disp_w}px;height:{disp_h}px;display:block;margin:0 auto;object-fit:contain;' />"
+        f"<p style='text-align:center;margin-top:10px;color:#666;'>"
+        f"{image_id} - {img_width}×{img_height} → {disp_w}×{disp_h} (via {source})"
+        f"</p></div></div>"
+    )
+
+
+if __name__ == "__main__":
+    main() 

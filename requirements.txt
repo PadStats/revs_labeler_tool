@@ -1,0 +1,8 @@
+streamlit>=1.32
+pandas
+requests
+python-dotenv
+pillow
+google-cloud-firestore
+google-auth
+google-api-core
