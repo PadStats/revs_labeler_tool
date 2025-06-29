@@ -18,4 +18,7 @@ EXPOSE 8501
 # The credentials file path can be supplied via the env var
 # GOOGLE_APPLICATION_CREDENTIALS when running the container.
 
-ENTRYPOINT ["streamlit", "run", "app.py"] 
+# Cloud Run best practice: expose 8080, but app listens on $PORT (defaults to 8501 locally)
+EXPOSE 8080
+
+ENTRYPOINT ["sh", "-c", "streamlit run app.py --server.port ${PORT:-8501} --server.address 0.0.0.0"] 
