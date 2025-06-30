@@ -623,96 +623,101 @@ def build_location_chain(chain_index: int):
             st.markdown("---")
 
 def build_dropdown_cascade_ui():
-    st.subheader("📍 Location Selection")
-    for i in range(len(st.session_state.location_chains)):
-        build_location_chain(i)
-    col1, _ = st.columns([1, 3])
-    with col1:
-        if st.button("➕ Add Another Location", key=f"add_location_{st.session_state.widget_refresh_counter}"):
-            # Comprehensive cleanup of any stale persistent state before adding new location
-            # This prevents data from previously removed locations from reappearing
-            
-            # Get current valid location names to preserve their state
-            current_leaves = get_leaf_locations()
-            
-            # Clean up feature persistent state - remove any state not associated with current locations
-            feature_keys_to_remove = []
-            for key in list(st.session_state.persistent_feature_state.keys()):
-                if key.startswith(('persistent_na_', 'persistent_sel_')):
-                    # Extract location name from key
-                    key_parts = key.split('_', 3)  # ['persistent', 'na/sel', 'location', 'category']
-                    if len(key_parts) >= 3:
-                        location_name = key_parts[2]
-                        # Only keep if this location is currently valid
-                        if location_name not in current_leaves:
-                            feature_keys_to_remove.append(key)
-            
-            for key in feature_keys_to_remove:
-                del st.session_state.persistent_feature_state[key]
-            
-            # Clean up attribute persistent state - remove any state not associated with current chain indices
-            current_chain_count = len(st.session_state.location_chains)
-            attr_keys_to_remove = []
-            for key in list(st.session_state.persistent_attribute_state.keys()):
-                if key.startswith('persistent_loc_'):
-                    parts = key.split('_', 3)
-                    if len(parts) >= 4:
-                        try:
-                            key_chain_idx = int(parts[2])
-                            # Remove if chain index is beyond current chains
-                            if key_chain_idx >= current_chain_count:
+    st.markdown("### 📍 Location Selection")
+    # Wrap the potentially long selector list inside a fixed-height, scrollable container.
+    # When the content exceeds the specified height Streamlit will add an internal scroll bar,
+    # keeping the overall page length manageable while still providing access to all widgets.
+    with st.container(height=480, border=True):
+        for i in range(len(st.session_state.location_chains)):
+            build_location_chain(i)
+
+        col1, _ = st.columns([1, 3])
+        with col1:
+            if st.button("➕ Add Another Location", key=f"add_location_{st.session_state.widget_refresh_counter}"):
+                # Comprehensive cleanup of any stale persistent state before adding new location
+                # This prevents data from previously removed locations from reappearing
+                
+                # Get current valid location names to preserve their state
+                current_leaves = get_leaf_locations()
+                
+                # Clean up feature persistent state - remove any state not associated with current locations
+                feature_keys_to_remove = []
+                for key in list(st.session_state.persistent_feature_state.keys()):
+                    if key.startswith(('persistent_na_', 'persistent_sel_')):
+                        # Extract location name from key
+                        key_parts = key.split('_', 3)  # ['persistent', 'na/sel', 'location', 'category']
+                        if len(key_parts) >= 3:
+                            location_name = key_parts[2]
+                            # Only keep if this location is currently valid
+                            if location_name not in current_leaves:
+                                feature_keys_to_remove.append(key)
+                
+                for key in feature_keys_to_remove:
+                    del st.session_state.persistent_feature_state[key]
+                
+                # Clean up attribute persistent state - remove any state not associated with current chain indices
+                current_chain_count = len(st.session_state.location_chains)
+                attr_keys_to_remove = []
+                for key in list(st.session_state.persistent_attribute_state.keys()):
+                    if key.startswith('persistent_loc_'):
+                        parts = key.split('_', 3)
+                        if len(parts) >= 4:
+                            try:
+                                key_chain_idx = int(parts[2])
+                                # Remove if chain index is beyond current chains
+                                if key_chain_idx >= current_chain_count:
+                                    attr_keys_to_remove.append(key)
+                            except ValueError:
+                                # Remove malformed keys
                                 attr_keys_to_remove.append(key)
-                        except ValueError:
-                            # Remove malformed keys
-                            attr_keys_to_remove.append(key)
-            
-            for key in attr_keys_to_remove:
-                del st.session_state.persistent_attribute_state[key]
-            
-            # Clean up any location attributes that reference invalid chain indices
-            loc_attr_keys_to_remove = []
-            for key in list(st.session_state.location_attributes.keys()):
-                if key.startswith('loc_'):
-                    parts = key.split('_', 2)
-                    if len(parts) >= 3:
-                        try:
-                            key_chain_idx = int(parts[1])
-                            # Remove if chain index is beyond current chains
-                            if key_chain_idx >= current_chain_count:
+                
+                for key in attr_keys_to_remove:
+                    del st.session_state.persistent_attribute_state[key]
+                
+                # Clean up any location attributes that reference invalid chain indices
+                loc_attr_keys_to_remove = []
+                for key in list(st.session_state.location_attributes.keys()):
+                    if key.startswith('loc_'):
+                        parts = key.split('_', 2)
+                        if len(parts) >= 3:
+                            try:
+                                key_chain_idx = int(parts[1])
+                                # Remove if chain index is beyond current chains
+                                if key_chain_idx >= current_chain_count:
+                                    loc_attr_keys_to_remove.append(key)
+                            except ValueError:
+                                # Remove malformed keys
                                 loc_attr_keys_to_remove.append(key)
-                        except ValueError:
-                            # Remove malformed keys
-                            loc_attr_keys_to_remove.append(key)
-            
-            for key in loc_attr_keys_to_remove:
-                del st.session_state.location_attributes[key]
-            
-            # Clean up widget states for invalid chain indices
-            widget_keys_to_remove = []
-            for key in list(st.session_state.widget_states.keys()):
-                if key.startswith('chain_'):
-                    parts = key.split('_', 3)
-                    if len(parts) >= 3:
-                        try:
-                            key_chain_idx = int(parts[1])
-                            # Remove if chain index is beyond current chains
-                            if key_chain_idx >= current_chain_count:
+                
+                for key in loc_attr_keys_to_remove:
+                    del st.session_state.location_attributes[key]
+                
+                # Clean up widget states for invalid chain indices
+                widget_keys_to_remove = []
+                for key in list(st.session_state.widget_states.keys()):
+                    if key.startswith('chain_'):
+                        parts = key.split('_', 3)
+                        if len(parts) >= 3:
+                            try:
+                                key_chain_idx = int(parts[1])
+                                # Remove if chain index is beyond current chains
+                                if key_chain_idx >= current_chain_count:
+                                    widget_keys_to_remove.append(key)
+                            except ValueError:
+                                # Remove malformed keys
                                 widget_keys_to_remove.append(key)
-                        except ValueError:
-                            # Remove malformed keys
-                            widget_keys_to_remove.append(key)
-            
-            for key in widget_keys_to_remove:
-                del st.session_state.widget_states[key]
-            
-            # Clear the removed locations tracking set since we've cleaned up
-            st.session_state.removed_locations = set()
-            
-            # Add the new empty location chain
-            st.session_state.location_chains.append({})
-            
-            st.rerun()
-            
+                
+                for key in widget_keys_to_remove:
+                    del st.session_state.widget_states[key]
+                
+                # Clear the removed locations tracking set since we've cleaned up
+                st.session_state.removed_locations = set()
+                
+                # Add the new empty location chain
+                st.session_state.location_chains.append({})
+                
+                st.rerun()
+                
     complete = get_complete_chains()
     total = len([c for c in st.session_state.location_chains if c])
     if total and len(complete) == total:
@@ -751,40 +756,45 @@ def build_location_features(location: str):
             # Since we can't tell which was more recent, default to keeping selections
             current_na = False
         
-        # Create the N/A checkbox
-        na_checked = st.checkbox("🚫 No relevant features", key=na_key, value=current_na)
-        
+        # --- Compact row: N/A checkbox + multiselect side-by-side ----------
+        col_na, col_sel = st.columns([1, 4], gap="small")
+
+        with col_na:
+            na_checked = st.checkbox(
+                "N/A",
+                key=na_key,
+                value=current_na,
+            )
+
+        with col_sel:
+            if not na_checked:
+                # Show multiselect on same row; hide its label
+                selected_features = st.multiselect(
+                    "Features",  # internal label for accessibility
+                    feats,
+                    default=current_selections,
+                    key=sel_key,
+                    label_visibility="collapsed",
+                )
+                # If features were selected while N/A was checked in prev state, clear N/A
+                if selected_features and na_checked:
+                    st.session_state[na_key] = False
+                    st.rerun()
+            else:
+                # Minimal marker so column keeps height but no extra padding
+                st.markdown("✅")
+
         # Handle state changes after widget interaction
         if na_checked != current_na:
-            # N/A state changed
+            # N/A state toggled
             if na_checked:
-                # N/A was just checked - clear selections
+                # Clear selections when N/A is set
                 st.session_state[sel_key] = []
-                current_selections = []
-        
-        # Show multiselect or N/A message
-        if not na_checked:
-            # Show multiselect
-            selected_features = st.multiselect(
-                "",
-                feats,
-                default=current_selections,
-                key=sel_key
-            )
-            
-            # If features were just selected and N/A is checked, uncheck N/A
-            if selected_features and na_checked:
-                st.session_state[na_key] = False
-                st.rerun()  # Force rerun to update UI
-                
-        else:
-            # Show N/A message
-            st.info("✅ Marked this category as N/A")
-
-        st.write("")  # spacing
+            # Force UI update
+            st.rerun()
 
 def build_feature_ui():
-    st.subheader("🔧 Features in Selected Locations")
+    st.markdown("### 🔧 Features in Selected Locations")
     leaves = get_leaf_locations()
     if not leaves:
         st.info("👆 Complete location selections to see features.")
@@ -796,13 +806,16 @@ def build_feature_ui():
         return
 
     st.caption("💡 Select features or mark N/A.")
-    if len(avail) == 1:
-        build_location_features(avail[0])
-    else:
-        tabs = st.tabs([f"📍 {loc}" for loc in sorted(avail)])
-        for i, loc in enumerate(sorted(avail)):
-            with tabs[i]:
-                build_location_features(loc)
+
+    # Constrain the (potentially large) feature selection UI to a scrollable box.
+    with st.container(height=500, border=True):
+        if len(avail) == 1:
+            build_location_features(avail[0])
+        else:
+            tabs = st.tabs([f"📍 {loc}" for loc in sorted(avail)])
+            for i, loc in enumerate(sorted(avail)):
+                with tabs[i]:
+                    build_location_features(loc)
 
     # Save state after UI is built (this preserves state for location changes)
     save_feature_state()
@@ -833,7 +846,7 @@ def build_feature_ui():
 
 
 def build_contextual_attribute_ui():
-    st.subheader("🏷️ Contextual Attributes")
+    st.markdown("### 🏷️ Contextual Attributes")
     complete = get_complete_chains()
     if not complete:
         st.info("👆 Complete locations first.")

@@ -175,6 +175,7 @@ def update_cache_with_saved_data(image_id: str, saved_labels: dict) -> None:
 def show_login_gate():
     """Show login gate before proceeding to main app."""
     st.set_page_config(page_title="Property Labeler – Login", layout="wide")
+    _inject_compact_css()
     
     st.title("🏠 Property Image Labeling Tool – Login")
     st.markdown("Please enter the credentials provided to you by your supervisor.")
@@ -267,6 +268,7 @@ def main() -> None:  # noqa: C901
     # or when the session naturally ends (Firestore has timeout reclaim for stale locks)
 
     st.set_page_config(page_title="Property Labeler – prototype", layout="wide")
+    _inject_compact_css()
     st.title("🏠 Property Image Labeling Tool – prototype")
 
     # Display logged-in user (read-only)
@@ -1145,6 +1147,30 @@ def _build_payload() -> dict:
         "attributes": attributes_map,
         "condition_scores": condition_scores,
     }
+
+
+# ---------------------------------------------------------------------------
+# Global UI tweaks – compact layout
+# ---------------------------------------------------------------------------
+
+
+def _inject_compact_css() -> None:
+    """Add a small CSS payload that shrinks default paddings & fonts."""
+    st.markdown(
+        """
+        <style>
+        /* tighten global vertical rhythm */
+        section[data-testid="stVerticalBlock"] { padding-top:0.25rem;padding-bottom:0.25rem; }
+        /* make headers & labels slimmer */
+        h1,h2,h3,h4,h5,h6,label,p,span,div { font-size:0.85rem !important; }
+        /* remove empty spacers Streamlit adds between widgets */
+        div[data-testid="stSpacer"] { height:0rem !important; }
+        /* cut the extra top padding around sliders */
+        div[data-testid="stSlider"] > div:first-child { padding-top:0rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":
