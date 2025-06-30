@@ -13,6 +13,7 @@ import streamlit as st
 from labeler_backend import get_repo
 import ui_components as ui
 from labeler_backend.bb_resolver import BackblazeResolverError  # new import
+import auth  # NEW: authentication helpers
 
 # Constants
 HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "10"))  # How many recent images to show in history
@@ -171,23 +172,39 @@ def update_cache_with_saved_data(image_id: str, saved_labels: dict) -> None:
         logger.info(f"[CACHE] Updated after save for image {image_id}")
 
 
-def show_username_gate():
-    """Show username input gate before proceeding to main app."""
-    st.set_page_config(page_title="Property Labeler – Welcome", layout="wide")
+def show_login_gate():
+    """Show login gate before proceeding to main app."""
+    st.set_page_config(page_title="Property Labeler – Login", layout="wide")
     
-    st.title("🏠 Property Image Labeling Tool")
-    st.markdown("### Welcome! Please enter your username to continue.")
-    st.markdown("Your username will be used to track your progress and lock tasks.")
+    st.title("🏠 Property Image Labeling Tool – Login")
+    st.markdown("Please enter the credentials provided to you by your supervisor.")
     
-    # Center the input
+    # Center the input widgets
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        username = st.text_input("Your username:", key="temp_username", placeholder="Enter your username")
+        username = st.text_input("Username", key="login_username")
+        password = st.text_input("Password", type="password", key="login_password")
         
-        if st.button("Continue", disabled=not username, use_container_width=True):
-            if username.strip():  # Ensure it's not just whitespace
-                st.session_state.username = username.strip()
-                st.rerun()  # Restart main() with username set
+        if st.button("Log in", disabled=not (username and password), use_container_width=True):
+            snap = auth.get_user_doc(username)
+            if not snap.exists:
+                st.error("Unknown user or password")
+                return
+
+            data = snap.to_dict() or {}
+            stored_hash = data.get("password_hash", "")
+            if not stored_hash or not auth.verify_pw(password, stored_hash):
+                st.error("Invalid password or password")
+                return
+
+            if not data.get("enabled", True):
+                st.error("Account disabled, please contact your supervisor")
+                return
+
+            # Success – populate session and reload the app
+            st.session_state.username = username
+            st.session_state.authenticated = True
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -215,9 +232,9 @@ def main() -> None:  # noqa: C901
     # Load environment variables (cached so we do not redo I/O every rerun)
     _load_env()
 
-    # Username gate check - must have valid username before proceeding
-    if "username" not in st.session_state or not st.session_state.username:
-        show_username_gate()
+    # Authentication gate – user must be logged in
+    if not st.session_state.get("authenticated"):
+        show_login_gate()
         return
 
     # ---------------------------------------------------------------
@@ -247,22 +264,8 @@ def main() -> None:  # noqa: C901
     st.set_page_config(page_title="Property Labeler – prototype", layout="wide")
     st.title("🏠 Property Image Labeling Tool – prototype")
 
-    # Show current username with option to change
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        new_username = st.text_input("Your username:", value=st.session_state.username)
-    with col2:
-        if st.button("Update Username"):
-            if new_username.strip() and new_username != st.session_state.username:
-                # Clear current task and restart
-                st.session_state.username = new_username.strip()
-                st.session_state.current_task = None
-                st.session_state.completed_stack = []
-                clear_cache()  # Clear cache when username changes
-                st.rerun()
-    
-    # Use session username for all operations
-    user_id = st.session_state.username
+    # Display logged-in user (read-only)
+    st.markdown(f"**Logged in as:** `{st.session_state.username}`")
 
     # 1️⃣ acquire or resume a task ------------------------------------------------
     task = st.session_state.current_task
@@ -274,10 +277,10 @@ def main() -> None:  # noqa: C901
             st.session_state.history_stack = hist_stack
             st.session_state.current_task = task
         else:
-            task = repo.get_next_task(user_id)
+            task = repo.get_next_task(st.session_state.username)
             if task is None:
                 # nothing in progress – fall back to labeled history
-                history = repo.get_user_history(user_id, limit=HISTORY_LIMIT)
+                history = repo.get_user_history(st.session_state.username, limit=HISTORY_LIMIT)
                 if history:
                     st.session_state.history_stack = history[1:]
                     task = history[0]
@@ -570,7 +573,7 @@ def main() -> None:  # noqa: C901
                 try:
                     payload = _build_payload()
                     logger.info(f"[FS] Saving labels for image {task['image_id']} (skip)")
-                    repo.save_labels(task["image_id"], payload, user_id)
+                    repo.save_labels(task["image_id"], payload, st.session_state.username)
                     # Update cache with saved data
                     update_cache_with_saved_data(task["image_id"], payload)
                 except:
@@ -636,7 +639,7 @@ def main() -> None:  # noqa: C901
             # Save current task first
             payload = _build_payload()
             logger.info(f"[FS] Saving labels for image {task['image_id']} (Go)")
-            repo.save_labels(task["image_id"], payload, user_id)
+            repo.save_labels(task["image_id"], payload, st.session_state.username)
             # Update cache with saved data
             update_cache_with_saved_data(task["image_id"], payload)
             st.session_state.completed_stack.append(task)
@@ -895,7 +898,7 @@ def main() -> None:  # noqa: C901
                      key="btn_save"):
             payload = _build_payload()
             logger.info(f"[FS] Saving labels for image {task['image_id']}")
-            repo.save_labels(task["image_id"], payload, user_id)
+            repo.save_labels(task["image_id"], payload, st.session_state.username)
             # Update cache with saved data
             update_cache_with_saved_data(task["image_id"], payload)
             st.success("Saved ✔︎")
@@ -964,7 +967,7 @@ def main() -> None:  # noqa: C901
             # Save current task first
             payload = _build_payload()
             logger.info(f"[FS] Saving labels for image {task['image_id']} (Go)")
-            repo.save_labels(task["image_id"], payload, user_id)
+            repo.save_labels(task["image_id"], payload, st.session_state.username)
             # Update cache with saved data
             update_cache_with_saved_data(task["image_id"], payload)
             # Clear cache for new image

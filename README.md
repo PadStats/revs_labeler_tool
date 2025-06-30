@@ -90,19 +90,21 @@ Switch repo with `LABEL_REPO=dev` (default) or `firestore`.
 ```
 `/revisions/` sub-collection stores previous payloads on every edit.
 
-### 3.3 `REVS_users`
+### 3.3 `REVS_users` (auth-enabled)
 ```jsonc
 {
-  "user_id"               : "user123",
-  "name"                  : "John Doe",
-  "email"                 : "j.doe@example.com",
+  "password_hash"         : "$2b$12$9…",      // bcrypt, never store plain-text
+  "enabled"               : true,              // set false to block login
+  "role"                  : "labeler",        // free-text (labeler | reviewer | admin …)
 
-  "current_image_id"      : "uuid | null",   // resume pointer
+  // --- stats written by FirestoreRepo.save_labels() ---
   "last_labeled_image_id" : "uuid | null",
   "total_images_labeled"  : 122,
   "timestamp_last_labeled": <ts>
 }
 ```
+
+Legacy fields like `name` or `email` are optional.  Anything not present is simply ignored by the login gate.
 
 ---
 
@@ -158,7 +160,34 @@ docker build -t labeler:latest .
 docker run -p 8501:8501 --env-file .env labeler:latest
 ```
 
-#### 5.3  One-liner Docker runner
+#### 5.3  User authentication (new in v1.1)
+
+The app now shows a **login screen**.  Credentials are stored in the `REVS_users` collection as bcrypt hashes.
+
+• A tiny helper script `provision_user.py` creates or updates accounts.
+
+```bash
+# create a labeler
+python provision_user.py alice S3cretPass!
+
+# reviewer role
+python provision_user.py bob MyPass --role reviewer
+
+# disable an account (no password needed)
+python provision_user.py bob --disable
+```
+
+If the document's `enabled` field is `false`, login is refused.
+
+Environment discovery order for credentials used by the script and the app:
+1. `FIRESTORE_CREDENTIALS_JSON` (raw JSON in env var)
+2. `SERVICE_ACCOUNT_JSON` (path to file, read at runtime)
+3. `GOOGLE_APPLICATION_CREDENTIALS` (standard ADC path)
+4. Application-Default-Credentials on Cloud Run / gcloud
+
+Dependency added: `bcrypt>=4.0.1` (already in `requirements.txt`).
+
+#### 5.4  One-liner Docker runner
 
 For convenience the repo ships with `run_labeler.sh`, a wrapper that builds (optional) and runs the container with all the right mounts and environment variables.
 
@@ -174,8 +203,9 @@ What the script does
 
 1. Reads `.env` for variables such as `GCP_PROJECT_ID`, `BB_RESOLVER_ENDPOINT`, and `LABEL_REPO=firestore`.
 2. Mounts the given service-account key read-only inside the container at `/secrets/key.json`.
-3. Publishes Streamlit on port **8501**.
-4. Rebuilds the Docker image when `--build` is passed.
+3. Publishes Streamlit on port **8501** (UI at `/labeler`).
+4. Gracefully cleans up the container on `Ctrl-C`; if a previous container is still running, it is auto-removed before launch.
+5. Rebuilds the Docker image when `--build` is passed.
 
 This saves you from memorising the full `docker run` incantation and guarantees consistent flags every time.
 
@@ -185,9 +215,11 @@ This saves you from memorising the full `docker run` incantation and guarantees 
 | Task | How |
 |------|-----|
 | Ingest new photos | Insert docs in **REVS_images** with `status="unlabeled"`. |
+| Provision / update user | `python provision_user.py <user> <pwd> [--role ROLE]` |
+| Disable user | `python provision_user.py <user> --disable` or set `enabled=false` in UI. |
 | Unlock stale tasks | Cloud Function every 15 min: `status=="in_progress" && task_expires_at < NOW()`. |
 | Review flagged | Query `(flagged==true && status=="labeled")`. |
-| Export labels | Query `REVS_labels` where `schema_version==1` → write to BigQuery or GCS. |
+| Export labels | Query **REVS_labels** where `schema_version==1` → write to BigQuery or GCS. |
 
 ---
 

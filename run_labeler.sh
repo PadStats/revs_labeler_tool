@@ -13,6 +13,7 @@
 set -euo pipefail
 
 IMAGE_NAME=property-labeler
+CONTAINER_NAME=property_labeler_dev
 
 # -----------------------------------------------------------------------------
 # Key-file discovery
@@ -42,8 +43,27 @@ if [[ "${1:-}" == "--build" ]]; then
   shift
 fi
 
-docker run --rm \
+# Clean up any previous container that might still be holding the port
+docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+
+docker run --name "$CONTAINER_NAME" \
   --env-file .env \
   -v "$(realpath "$KEY_PATH")":/secrets/key.json:ro \
   -p 8501:8501 \
-  "$IMAGE_NAME" 
+  "$IMAGE_NAME" &
+
+# Capture PID of docker run (background job)
+DOCKER_PID=$!
+
+# Forward Ctrl+C / SIGINT to container and ensure clean-up
+cleanup() {
+  echo -e "\nStopping container $CONTAINER_NAME …"
+  docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  exit 0
+}
+
+trap cleanup INT TERM
+
+# Wait for docker process to exit
+wait $DOCKER_PID 

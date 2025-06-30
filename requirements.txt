@@ -6,3 +6,4 @@ pillow
 google-cloud-firestore
 google-auth
 google-api-core
+bcrypt>=4.0.1
