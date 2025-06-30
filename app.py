@@ -203,6 +203,8 @@ def show_login_gate():
 
             # Success – populate session and reload the app
             st.session_state.username = username
+            # Store user role for conditional UI rendering (default to 'labeler')
+            st.session_state.role = data.get("role", "labeler")
             st.session_state.authenticated = True
             st.rerun()
 
@@ -236,6 +238,9 @@ def main() -> None:  # noqa: C901
     if not st.session_state.get("authenticated"):
         show_login_gate()
         return
+
+    # Determine current user's role
+    is_admin = st.session_state.get("role") == "admin"
 
     # ---------------------------------------------------------------
     # Cache the LabelRepo so we do NOT rebuild a Firestore client on
@@ -485,9 +490,11 @@ def main() -> None:  # noqa: C901
             ui_state = build_complete_ui_state()
             cache_task_data(image_id, task, {}, ui_state)
 
-    st.markdown(
-        f"**Repo mode:** `{mode}` | **image_id:** `{task['image_id']}` | status: {task['status']}"
-    )
+    # Show repository/debug info only to admins
+    if is_admin:
+        st.markdown(
+            f"**Repo mode:** `{mode}`\t|\t**image_id:** `{task['image_id']}`\t|\tstatus: {task['status']}"
+        )
 
     # Refresh cached ui_state snapshot (no GUI output)
     _update_cache_ui_state(update_timestamp=True)
@@ -544,7 +551,7 @@ def main() -> None:  # noqa: C901
         b64: str = cache_entry['image_b64']  # type: ignore[assignment]
         w, h = cache_entry['image_meta']
         logger.info("[PERF] base64 path used")
-        html = _html_image_from_b64(b64, w, h, "Cache", task['image_id'])
+        html = _html_image_from_b64(b64, w, h, "Cache", task['image_id'], admin=is_admin)
         st.markdown(html, unsafe_allow_html=True)
         image_displayed = True
     else:
@@ -562,7 +569,7 @@ def main() -> None:  # noqa: C901
                 # Pre-compute & store heavy transforms once
                 img_b64 = base64.b64encode(img_bytes).decode()
 
-                html = _html_image_from_b64(img_b64, img.size[0], img.size[1], source_name, task['image_id'])
+                html = _html_image_from_b64(img_b64, img.size[0], img.size[1], source_name, task['image_id'], admin=is_admin)
                 st.markdown(html, unsafe_allow_html=True)
                 image_displayed = True
 
@@ -979,55 +986,60 @@ def main() -> None:  # noqa: C901
     st.subheader("📝 Additional Information")
     st.session_state.notes = st.text_area("Notes", value=st.session_state.notes, height=80)
 
-    # Go-to-page - recalculate validation for final buttons (from legacy)
+    # Go-to-page navigation is an admin-only feature
     final_validation = ui.can_move_on()
-    
-    go_left, go_mid, go_right = st.columns([3, 1, 3], gap="small")
-    with go_mid:
-        goto = st.number_input(
-            "Go to page",
-            min_value=1,
-            max_value=1000,  # We don't know the total count in repo mode, so use a reasonable max
-            value=1,  # Default to 1 since we don't have an index
-            step=1,
-            key="goto_input_bottom",
-            label_visibility="collapsed"
-        )
-        if st.button("🔎 Go", 
-                     use_container_width=True, 
-                     disabled=not final_validation,
-                     key="btn_goto_bottom"):
-            # Save current task first
-            payload = _build_payload()
-            logger.info(f"[FS] Saving labels for image {task['image_id']} (Go)")
-            repo.save_labels(task["image_id"], payload, st.session_state.username)
-            # Update cache with saved data
-            update_cache_with_saved_data(task["image_id"], payload)
-            # Clear cache for new image
-            clear_cache()
-            st.session_state.current_task = None  # triggers get_next_task on rerun
-            st.rerun()
 
-    # Render cache debug panel at bottom
-    with st.container():
-        with st.expander("🗄️ Cache Debug", expanded=False):
-            st.json(cache_debug_info["cache"], expanded=False)
-            st.write("**Cache Hit:**", cache_debug_info["hit"])
-            c = cache_debug_info["cache"]
-            if c.get('cached_at'):
-                st.write("**Cache Age:**", f"{time.time() - c['cached_at']:.1f}s")
-            if c.get('last_accessed'):
-                st.write("**Last Accessed:**", f"{time.time() - c['last_accessed']:.1f}s ago")
+    if is_admin:
+        go_left, go_mid, go_right = st.columns([3, 1, 3], gap="small")
+        with go_mid:
+            goto = st.number_input(
+                "Go to page",
+                min_value=1,
+                max_value=1000,  # Reasonable upper bound
+                value=1,
+                step=1,
+                key="goto_input_bottom",
+                label_visibility="collapsed"
+            )
+            if st.button(
+                "🔎 Go",
+                use_container_width=True,
+                disabled=not final_validation,
+                key="btn_goto_bottom",
+            ):
+                # Save current task first
+                payload = _build_payload()
+                logger.info(f"[FS] Saving labels for image {task['image_id']} (Go)")
+                repo.save_labels(task["image_id"], payload, st.session_state.username)
+                # Update cache with saved data
+                update_cache_with_saved_data(task["image_id"], payload)
+                # Clear cache and load next image
+                clear_cache()
+                st.session_state.current_task = None  # triggers get_next_task on rerun
+                st.rerun()
 
-    # Debug: Show task document structure (temporary)
-    st.markdown("---")
-    st.markdown(f"**Debug - Task keys:** `{list(task.keys())}`")
-    st.markdown(f"**Debug - bb_url:** `{repr(task.get('bb_url'))}`")
-    
-    potential_url_fields = ['backblaze_url', 'image_url', 'url', 'path', 'file_path', 'storage_path']
-    for field in potential_url_fields:
-        if field in task:
-            st.markdown(f"**Debug - {field}:** `{repr(task.get(field))}`")
+    # Admin-only debug panels ---------------------------------------------------
+    if is_admin:
+        # Cache debug panel
+        with st.container():
+            with st.expander("🗄️ Cache Debug", expanded=False):
+                st.json(cache_debug_info["cache"], expanded=False)
+                st.write("**Cache Hit:**", cache_debug_info["hit"])
+                c = cache_debug_info["cache"]
+                if c.get('cached_at'):
+                    st.write("**Cache Age:**", f"{time.time() - c['cached_at']:.1f}s")
+                if c.get('last_accessed'):
+                    st.write("**Last Accessed:**", f"{time.time() - c['last_accessed']:.1f}s ago")
+
+        # Task document debug dump
+        st.markdown("---")
+        st.markdown(f"**Debug - Task keys:** `{list(task.keys())}`")
+        st.markdown(f"**Debug - bb_url:** `{repr(task.get('bb_url'))}`")
+        
+        potential_url_fields = ['backblaze_url', 'image_url', 'url', 'path', 'file_path', 'storage_path']
+        for field in potential_url_fields:
+            if field in task:
+                st.markdown(f"**Debug - {field}:** `{repr(task.get(field))}`")
 
 
 # ---------------------------------------------------------------------------
@@ -1041,6 +1053,8 @@ def _html_image_from_b64(
     img_height: int,
     source: str,
     image_id: str,
+    *,
+    admin: bool = False,
 ) -> str:
     """Return HTML snippet using a pre-computed base64 string."""
 
@@ -1060,14 +1074,19 @@ def _html_image_from_b64(
         f = MIN_H / disp_h
         disp_h, disp_w = MIN_H, int(disp_w * f)
 
+    meta = (
+        f"<p style='text-align:center;margin-top:10px;color:#666;'>"
+        f"{image_id} - {img_width}×{img_height} → {disp_w}×{disp_h} (via {source})"
+        f"</p>"
+    ) if admin else ""
+
     return (
         f"<div style='display:flex;justify-content:center;align-items:center;width:100%;margin:20px 0;'>"
         f"<div style='text-align:center;'>"
         f"<img src='data:image/jpeg;base64,{img_b64}' "
         f"style='width:{disp_w}px;height:{disp_h}px;display:block;margin:0 auto;object-fit:contain;' />"
-        f"<p style='text-align:center;margin-top:10px;color:#666;'>"
-        f"{image_id} - {img_width}×{img_height} → {disp_w}×{disp_h} (via {source})"
-        f"</p></div></div>"
+        f"{meta}"
+        f"</div></div>"
     )
 
 
