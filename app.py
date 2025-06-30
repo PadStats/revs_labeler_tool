@@ -1083,7 +1083,7 @@ def _html_image_from_b64(
     ) if admin else ""
 
     return (
-        f"<div style='display:flex;justify-content:center;align-items:center;width:100%;margin:20px 0;'>"
+        f"<div style='display:flex;justify-content:center;align-items:center;width:100%;margin:10px 0;'>"
         f"<div style='text-align:center;'>"
         f"<img src='data:image/jpeg;base64,{img_b64}' "
         f"style='width:{disp_w}px;height:{disp_h}px;display:block;margin:0 auto;object-fit:contain;' />"
@@ -1167,6 +1167,9 @@ def _inject_compact_css() -> None:
         div[data-testid="stSpacer"] { height:0rem !important; }
         /* cut the extra top padding around sliders */
         div[data-testid="stSlider"] > div:first-child { padding-top:0rem; }
+        /* NEW: Pull overall content closer to the top */
+        .block-container { padding-top:0.5rem !important; padding-bottom:0.5rem !important; }
+        header[data-testid="stHeader"] { height:0rem; padding:0rem; }
         </style>
         """,
         unsafe_allow_html=True,
