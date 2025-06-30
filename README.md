@@ -168,13 +168,13 @@ The app now shows a **login screen**.  Credentials are stored in the `REVS_users
 
 ```bash
 # create a labeler
-python provision_user.py alice S3cretPass!
+python -m admin_tools.provision_user alice S3cretPass!
 
 # reviewer role
-python provision_user.py bob MyPass --role reviewer
+python -m admin_tools.provision_user bob MyPass --role reviewer
 
 # disable an account (no password needed)
-python provision_user.py bob --disable
+python -m admin_tools.provision_user bob --disable
 ```
 
 If the document's `enabled` field is `false`, login is refused.
@@ -209,28 +209,68 @@ What the script does
 
 This saves you from memorising the full `docker run` incantation and guarantees consistent flags every time.
 
+## 6 · Admin CLI toolkit
+
+All maintenance scripts live in the package `admin_tools` and share the same
+credential-discovery logic as the app (env var blob → key-file path → ADC).
+
+Run any script with `python -m admin_tools.<script> --help` to see full
+arguments.  Current commands:
+
+| Script | Purpose |
+|--------|---------|
+| `provision_user` | Create, update, disable user accounts (bcrypt hashes). |
+| `user_stats` | Show per-user counters and history. |
+| `unlock_tasks` | Free `in_progress` images (filter by `--user`, `--stale`, or explicit `IMAGE_ID`). |
+| `flagged_images` | List / unflag images marked `flagged=true`. |
+| `retire_image` | Mark an image `status=removed` (and optionally delete its labels). |
+| `wipe_labels` | Delete label documents for one or **all** images (safety flags required). |
+
+### 6.1  Automated stale-lock cleanup
+
+If you want this to run unattended instead of manually invoking
+`unlock_tasks`, deploy a **Cloud Run Job** that executes:
+
+```bash
+# Dockerfile already contains cron_unlock.py
+python cron_unlock.py      # equivalent to: unlock_tasks --stale --execute
+```
+
+Trigger the job daily via **Cloud Scheduler** (e.g. `0 2 * * *`).  Because the
+job uses the same container image as the Streamlit service you can update it in
+CI/CD with:
+
+```bash
+gcloud run jobs update unlock-daily \
+  --image gcr.io/$PROJECT/labeler:$GITHUB_SHA --region us-central1
+```
+
+This keeps locks healthy without risking active work.
+
 ---
 
-## 6 · Admin operations
+## 7 · Admin operations
 | Task | How |
 |------|-----|
 | Ingest new photos | Insert docs in **REVS_images** with `status="unlabeled"`. |
-| Provision / update user | `python provision_user.py <user> <pwd> [--role ROLE]` |
-| Disable user | `python provision_user.py <user> --disable` or set `enabled=false` in UI. |
-| Unlock stale tasks | Cloud Function every 15 min: `status=="in_progress" && task_expires_at < NOW()`. |
-| Review flagged | Query `(flagged==true && status=="labeled")`. |
-| Export labels | Query **REVS_labels** where `schema_version==1` → write to BigQuery or GCS. |
+| Provision / update user | `python -m admin_tools.provision_user <user> <pwd> [--role ROLE]` |
+| Disable user | `python -m admin_tools.provision_user <user> --disable` or set `enabled=false` in UI. |
+| Unlock tasks (manual) | `python -m admin_tools.unlock_tasks [IMG_ID] [--user USER] [--stale] --execute` |
+| Retire image | `python -m admin_tools.retire_image IMG_ID [--wipe] --yes` |
+| Review / unflag images | `python -m admin_tools.flagged_images [--user USER] [--unflag] [--execute]` |
+| Wipe labels | `python -m admin_tools.wipe_labels IMG_ID --yes` or `--all --yes` |
+| User stats | `python -m admin_tools.user_stats [user] [--history N]` |
 
 ---
 
-## 7 · Extending
+## 8 · Extending
 * **Taxonomy update** – bump `schema_version`, update `taxonomy.py`, migrate old docs or keep them read-only.
 * **QA workflow** – use `qa_status` in **REVS_images** and enable reviewers to change it.
 * **Analytics** – create `(property_id, timestamp_created)` index on **REVS_labels** for time-series per property.
 
 ---
 
-## 8 · Troubleshooting
+## 9 · Troubleshooting
 | Symptom | Likely cause |
 |---------|--------------|
 | Image fails to load | Wrong `bb_url` or resolver endpoint down. |
