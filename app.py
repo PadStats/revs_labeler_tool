@@ -830,51 +830,7 @@ def main() -> None:  # noqa: C901
 
             st.markdown(cache_entry['cond_scores_html'], unsafe_allow_html=True)
 
-    # ---------- save helper (moved here so it's available for all buttons)
-    def _build_payload() -> dict:  # noqa: D401
-        # --- spatial labels ---
-        spatial_list = ui.chains_to_label_strings()
-
-        # --- feature labels ---
-        feature_set: set[str] = set()
-        leaves = ui.get_leaf_locations()
-        for loc in leaves:
-            if loc not in ui.FEATURE_TAXONOMY:
-                continue
-            for category in ui.FEATURE_TAXONOMY[loc]:
-                sel_key = f"sel_{loc}_{category}"
-                selections = st.session_state.get(sel_key, [])  # type: ignore[arg-type]
-                feature_set.update(selections)
-
-        # --- contextual attributes ---
-        attributes_map: dict[str, str] = {}
-        for attr in ui.LOCATION_TAXONOMY.get("attributes", {}):
-            attr_values = []
-            for loc_key, attrs in st.session_state.location_attributes.items():  # type: ignore[attr-defined]
-                if attr in attrs and attrs[attr]:
-                    # key format loc_<idx>_<leaf>
-                    leaf_name = loc_key.split("_", 2)[-1]
-                    attr_values.append(f"{leaf_name}:{attrs[attr]}")
-            if attr_values:
-                attributes_map[attr] = "|".join(attr_values)
-
-        # --- condition scores ---
-        cond = st.session_state.condition_scores  # type: ignore[attr-defined]
-        condition_scores = {
-            "property_condition": None if st.session_state.get("property_condition_na", False) else cond["property_condition"],
-            "quality_of_construction": cond["quality_of_construction"],
-            "improvement_condition": cond["improvement_condition"],
-        }
-
-        return {
-            "notes": st.session_state.notes,
-            "flagged": st.session_state.flagged,
-            "schema_version": 1,
-            "spatial_labels": spatial_list,  # list[str]
-            "feature_labels": sorted(feature_set),  # list[str]
-            "attributes": attributes_map,
-            "condition_scores": condition_scores,
-        }
+    # ---------- save helper was moved to module scope (_build_payload) ----------
 
     # Clear/Save buttons - recalculate validation for buttons that may be affected by UI interactions (from legacy)
     cs_left, cs_clear, cs_save, cs_right = st.columns([3, 1, 1, 3], gap="small")
@@ -1036,6 +992,63 @@ def _html_image_from_b64(
         f"{image_id} - {img_width}×{img_height} → {disp_w}×{disp_h} (via {source})"
         f"</p></div></div>"
     )
+
+
+# Add global build payload helper before main definition
+def _build_payload() -> dict:
+    """Collect current UI selections into a Firestore-ready payload.
+
+    Moved to module scope so it is defined before `main()` references it.
+    Uses only `st.session_state`, so no args are required.
+    """
+
+    import ui_components as ui  # local import to avoid circular at top
+    import streamlit as st
+
+    # --- spatial labels ---
+    spatial_list = ui.chains_to_label_strings()
+
+    # --- feature labels ---
+    feature_set: set[str] = set()
+    leaves = ui.get_leaf_locations()
+    for loc in leaves:
+        if loc not in ui.FEATURE_TAXONOMY:
+            continue
+        for category in ui.FEATURE_TAXONOMY[loc]:
+            sel_key = f"sel_{loc}_{category}"
+            selections = st.session_state.get(sel_key, [])  # type: ignore[arg-type]
+            feature_set.update(selections)
+
+    # --- contextual attributes ---
+    attributes_map: dict[str, str] = {}
+    for attr in ui.LOCATION_TAXONOMY.get("attributes", {}):
+        attr_values = []
+        for loc_key, attrs in st.session_state.location_attributes.items():  # type: ignore[attr-defined]
+            if attr in attrs and attrs[attr]:
+                # key format loc_<idx>_<leaf>
+                leaf_name = loc_key.split("_", 2)[-1]
+                attr_values.append(f"{leaf_name}:{attrs[attr]}")
+        if attr_values:
+            attributes_map[attr] = "|".join(attr_values)
+
+    # --- condition scores ---
+    cond = st.session_state.condition_scores  # type: ignore[attr-defined]
+    condition_scores = {
+        "property_condition": None if st.session_state.get("property_condition_na", False) else cond["property_condition"],
+        "quality_of_construction": cond["quality_of_construction"],
+        "improvement_condition": cond["improvement_condition"],
+    }
+
+    return {
+        "notes": st.session_state.notes,
+        "flagged": st.session_state.flagged,
+        "schema_version": 1,
+        "labeled_by": st.session_state.get("username", ""),
+        "spatial_labels": spatial_list,  # list[str]
+        "feature_labels": sorted(feature_set),  # list[str]
+        "attributes": attributes_map,
+        "condition_scores": condition_scores,
+    }
 
 
 if __name__ == "__main__":
