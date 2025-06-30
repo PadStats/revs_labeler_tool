@@ -26,4 +26,7 @@ class LabelRepo(Protocol):
 
     # --- user history ---
     def get_user_history(self, user_id: str, limit: int = 200) -> list[Dict]:
-        """Return newest-first list of this user's labeled docs (length <= *limit*).""" 
+        """Return newest-first list of this user's labeled docs (length <= *limit*)."""
+
+    def get_image_doc(self, image_id: str) -> Optional[Dict]:
+        """Return image document (from REVS_images) for given *image_id*, or None if not found.""" 

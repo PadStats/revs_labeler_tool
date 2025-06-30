@@ -956,9 +956,9 @@ def build_condition_scores_ui():
             "Property Condition Score",
             min_value=1.0,
             max_value=5.0,
-            value=round(current_prop_score, 2),
-            step=0.01,
-            format="%.2f",
+            value=round(current_prop_score, 3),
+            step=0.001,
+            format="%.3f",
             key=prop_key,
             label_visibility="collapsed",
             disabled=confirm_checked or na_checked
@@ -996,7 +996,7 @@ def build_condition_scores_ui():
         if na_checked:
             st.markdown(f"**Current Score: N/A**")
         else:
-            st.markdown(f"**Current Score: {current_prop_score:.2f} ({current_interpretation})**")
+            st.markdown(f"**Current Score: {current_prop_score:.3f} ({current_interpretation})**")
         
         # Confirm and N/A checkboxes below slider
         col_confirm, col_na = st.columns([2, 1])
@@ -1027,7 +1027,7 @@ def build_condition_scores_ui():
 
         # If user adjusts the slider, immediately update session_state and trigger rerun
         if not (confirm_checked or na_checked):
-            if abs(new_prop_score - current_prop_score) > 0.0009:  # tiny tolerance for float noise
+            if abs(new_prop_score - current_prop_score) > 0.00009:  # tighter tolerance due to higher precision
                 st.session_state.condition_scores["property_condition"] = new_prop_score
                 save_condition_state()
                 st.rerun()

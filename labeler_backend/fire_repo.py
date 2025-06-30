@@ -170,4 +170,21 @@ class FirestoreRepo(LabelRepo):
             .order_by("timestamp_created", direction=firestore.Query.DESCENDING)
             .limit(limit)
         )
-        return [doc.to_dict() for doc in q.stream()] 
+        # Include the Firestore doc ID (which is the image_id) so callers can
+        # reliably reference the associated image document.
+        return [
+            {**doc.to_dict(), "image_id": doc.id, "status": "labeled"}
+            for doc in q.stream()
+        ]
+
+    # ------------------------------------------------------------------
+    # Image document lookup (helper for navigation)
+    # ------------------------------------------------------------------
+    def get_image_doc(self, image_id: str) -> Optional[Dict]:  # type: ignore[override]
+        snap = self.images.document(image_id).get()
+        if not snap.exists:
+            return None
+        data = snap.to_dict() or {}
+        # Ensure key fields exist for downstream UI logic
+        data.update({"image_id": image_id})
+        return data 

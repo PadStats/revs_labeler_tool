@@ -421,32 +421,64 @@ def main() -> None:  # noqa: C901
             # No existing labels document – start with defaults and cache blank label set
             ui.reset_session_state_to_defaults()
 
-            # If the task document has a condition_score field, seed it
-            if "condition_score" in task:
+            # ------------------------------------------------------------------
+            # Seed pre-existing condition score (if any) from the image document.
+            # The REVS_images schema evolved over time, so we support multiple
+            # possible field layouts:
+            #   1) Legacy  – top-level  "condition_score" (float | null)
+            #   2) Current – nested     "condition_scores.property_condition"
+            #   3) Ad-hoc  – top-level  "property_condition" (float | null)
+            # Any *null* value is interpreted as "N/A".
+            # ------------------------------------------------------------------
+
+            prop_val = None
+
+            if "condition_scores" in task and isinstance(task["condition_scores"], dict):
+                # Newer schema – grab the nested field if present.
+                prop_val = task["condition_scores"].get("property_condition")
+            elif "condition_score" in task:
+                # Legacy flat field.
                 prop_val = task["condition_score"]
-                if prop_val is None:
-                    st.session_state.condition_scores = {
-                        "property_condition": 3.0,
-                        "quality_of_construction": "",
-                        "improvement_condition": "",
-                    }
-                    st.session_state.property_condition_na = True
-                    st.session_state.property_condition_confirmed = False
-                else:
+            elif "property_condition" in task:
+                # Fallback catch-all.
+                prop_val = task["property_condition"]
+
+            # Normalise the value and update session state.
+            if prop_val is None:
+                # Treat null/None as "N/A".
+                st.session_state.condition_scores = {
+                    "property_condition": 3.0,
+                    "quality_of_construction": "",
+                    "improvement_condition": "",
+                }
+                st.session_state.property_condition_na = True
+            else:
+                try:
                     st.session_state.condition_scores = {
                         "property_condition": float(prop_val),
                         "quality_of_construction": "",
                         "improvement_condition": "",
                     }
-                    st.session_state.property_condition_na = False
-                    st.session_state.property_condition_confirmed = False
+                except (TypeError, ValueError):
+                    # If the value is not directly castable (e.g. Decimal), fall back.
+                    st.session_state.condition_scores = {
+                        "property_condition": float(str(prop_val)),
+                        "quality_of_construction": "",
+                        "improvement_condition": "",
+                    }
+                st.session_state.property_condition_na = False
 
-                st.session_state.persistent_condition_state = {
-                    "property_condition": st.session_state.condition_scores["property_condition"],
-                    "quality_of_construction": "",
-                    "improvement_condition": "",
-                    "property_confirmed": False,
-                }
+            # For images yet to be reviewed by a human the score is *not* confirmed.
+            st.session_state.property_condition_confirmed = False
+
+            # Persist so downstream UI rebuilds pick up the value via
+            # ui.restore_condition_state().
+            st.session_state.persistent_condition_state = {
+                "property_condition": st.session_state.condition_scores["property_condition"],
+                "quality_of_construction": "",
+                "improvement_condition": "",
+                "property_confirmed": False,
+            }
 
             # Cache the loaded data (empty labels)
             st.session_state.widget_refresh_counter += 1
@@ -621,15 +653,60 @@ def main() -> None:  # noqa: C901
     can_proceed = ui.can_move_on()
 
     with nav_prev:
-        disabled = len(st.session_state.completed_stack) == 0
+        # Determine if the user has something to go back to:
+        # 1) items from this session (completed_stack) OR
+        # 2) most-recently labeled image in Firestore history.
+        has_session_prev = len(st.session_state.completed_stack) > 0
+
+        prev_hist: list = []
+        has_remote_prev = False
+        if not has_session_prev:
+            try:
+                prev_hist = repo.get_user_history(st.session_state.username, limit=1)
+                has_remote_prev = bool(prev_hist)
+            except Exception as _:
+                has_remote_prev = False
+
+        disabled = not (has_session_prev or has_remote_prev)
+
         if st.button("⬅️ Previous",
                      use_container_width=True,
                      disabled=disabled,
                      key="btn_prev"):
-            # Clear cache when moving to different image
             clear_cache()
-            st.session_state.current_task = st.session_state.completed_stack.pop()
-            st.rerun()
+
+            if has_session_prev:
+                # Use in-session stack first (fast, no network).
+                st.session_state.current_task = st.session_state.completed_stack.pop()
+                st.rerun()
+
+            elif has_remote_prev:
+                # Fallback: pull the most recent labeled image for the user.
+                prev_hist = repo.get_user_history(st.session_state.username, limit=1)
+                has_remote_prev = bool(prev_hist)
+                if prev_hist:
+                    hist_entry = prev_hist[0]
+                    image_id = hist_entry.get("image_id")
+                    if image_id:
+                        try:
+                            img_doc = repo.get_image_doc(image_id)  # type: ignore[attr-defined]
+                        except AttributeError:
+                            img_doc = None  # Repo does not implement helper
+
+                        # If helper failed, fall back to minimal task dict.
+                        if not img_doc:
+                            img_doc = {
+                                "image_id": image_id,
+                                "status": "labeled",
+                                "bb_url": hist_entry.get("bb_url", ""),
+                            }
+
+                        # Ensure at least bb_url/image_url fields so downstream resolves.
+                        # We merge history data to retain saved labels snapshot.
+                        img_doc = {**hist_entry, **img_doc}
+
+                        st.session_state.current_task = img_doc
+                    st.rerun()
 
     with nav_next:
         if st.button("➡️ Next",

@@ -64,7 +64,21 @@ class DevRepo(LabelRepo):
 
     # ---------------- history ----------------
     def get_user_history(self, user_id: str, limit: int = 200) -> list[Dict]:  # noqa: D401
+        # For dev mode, we can synthesise history from the CSV / mock store
+        # but for simplicity we return an empty list (no history).
         return []  # history not supported in dev mode
+
+    # ---------------- image doc helper ----------------
+    def get_image_doc(self, image_id: str) -> Optional[Dict]:  # type: ignore[override]
+        for path in self._images:
+            if Path(path).name == image_id:
+                return {
+                    "image_id": image_id,
+                    "local_path": path,
+                    "bb_url": path,
+                    "status": "labeled",
+                }
+        return None
 
     # ---------------- internals ----------------
     @staticmethod
