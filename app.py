@@ -644,7 +644,11 @@ def main() -> None:  # noqa: C901
     spacer_px: int
     if cache_entry.get('image_meta'):
         w, h = cache_entry['image_meta']  # type: ignore[assignment]
-        spacer_px = _compute_display_height(w, h) + 115  # tighter header allowance
+        # Add extra padding for header text, fade overlay, etc.
+        base_extra = 40  # baseline for labelers
+        if is_admin:
+            base_extra += 50  # meta debug paragraph & extra margin
+        spacer_px = _compute_display_height(w, h) + base_extra
     else:
         # Fallback if image dimensions are unavailable
         print("no image meta, using fallback")
@@ -785,9 +789,12 @@ def main() -> None:  # noqa: C901
 
     with sel_mid:
         with st.expander("📋 Current Selections", expanded=True):
-            loc_col, feat_col = st.columns([1, 1], gap="medium")
+            # ------------------------------------------------------------------
+            # 3-column grid: Locations | Features | Attributes
+            # ------------------------------------------------------------------
+            loc_col, feat_col, attr_col = st.columns([1, 1, 1], gap="medium")
 
-            # Left: Locations
+            # ---- Locations ----
             with loc_col:
                 st.subheader("Locations")
                 if complete:
@@ -796,10 +803,10 @@ def main() -> None:  # noqa: C901
                 else:
                     st.write("_(none selected)_")
 
-            # Right: Features grid (cached HTML)
+            # ---- Features ----
             with feat_col:
                 st.subheader("Features")
-
+                
                 # Hash current selections for change detection
                 feature_hash = "|".join(
                     f"{loc}:{','.join(sorted(feats))}" for loc, feats in sorted(feats_by_loc.items()) if feats
@@ -845,42 +852,43 @@ def main() -> None:  # noqa: C901
 
                     st.markdown(table_html, unsafe_allow_html=True)
 
-            # -------------------- Attributes --------------------
-            st.subheader("Attributes")
+            # ---- Attributes ----
+            with attr_col:
+                st.subheader("Attributes")
 
-            # Build hash for attribute selections
-            attr_hash = hash(str(st.session_state.location_attributes))
+                # Build hash for attribute selections
+                attr_hash = hash(str(st.session_state.location_attributes))
 
-            if not st.session_state.location_attributes:
-                st.write("_(no attributes yet)_")
-            else:
-                if cache_entry.get('attr_table_hash') != attr_hash:
-                    logger.info("[PERF] attribute table rebuilt")
-                    attr_table_html = "<table style='width:100%; border-collapse: collapse;'>"
-                    attr_table_html += "<tr><th style='text-align:left; padding:4px'>Location</th><th style='text-align:left; padding:4px'>Attribute</th><th style='text-align:left; padding:4px'>Value</th></tr>"
+                if not st.session_state.location_attributes:
+                    st.write("_(no attributes yet)_")
+                else:
+                    if cache_entry.get('attr_table_hash') != attr_hash:
+                        logger.info("[PERF] attribute table rebuilt")
+                        attr_table_html = "<table style='width:100%; border-collapse: collapse;'>"
+                        attr_table_html += "<tr><th style='text-align:left; padding:4px'>Location</th><th style='text-align:left; padding:4px'>Attribute</th><th style='text-align:left; padding:4px'>Value</th></tr>"
 
-                    for location_key, attrs in st.session_state.location_attributes.items():
-                        if not attrs:
-                            continue
-                        loc_parts = location_key.split('_', 2)
-                        if len(loc_parts) < 3:
-                            continue
-                        location_name = loc_parts[2]
+                        for location_key, attrs in st.session_state.location_attributes.items():
+                            if not attrs:
+                                continue
+                            loc_parts = location_key.split('_', 2)
+                            if len(loc_parts) < 3:
+                                continue
+                            location_name = loc_parts[2]
 
-                        for attr, value in attrs.items():
-                            if value:
-                                attr_display = attr.replace("_", " ").title()
-                                attr_table_html += (
-                                    f"<tr><td style='text-align:left; padding:2px'>{location_name}</td>"
-                                    f"<td style='text-align:left; padding:2px'>{attr_display}</td>"
-                                    f"<td style='text-align:left; padding:2px'>{value}</td></tr>"
-                                )
+                            for attr, value in attrs.items():
+                                if value:
+                                    attr_display = attr.replace("_", " ").title()
+                                    attr_table_html += (
+                                        f"<tr><td style='text-align:left; padding:2px'>{location_name}</td>"
+                                        f"<td style='text-align:left; padding:2px'>{attr_display}</td>"
+                                        f"<td style='text-align:left; padding:2px'>{value}</td></tr>"
+                                    )
 
-                    attr_table_html += "</table>"
+                        attr_table_html += "</table>"
 
-                    cache_entry['attr_table_html'] = attr_table_html
-                    cache_entry['attr_table_hash'] = attr_hash
-                st.markdown(cache_entry['attr_table_html'], unsafe_allow_html=True)
+                        cache_entry['attr_table_html'] = attr_table_html
+                        cache_entry['attr_table_hash'] = attr_hash
+                    st.markdown(cache_entry['attr_table_html'], unsafe_allow_html=True)
 
             # ---------------- Condition Scores ------------------
             st.subheader("Condition Scores")
@@ -940,57 +948,44 @@ def main() -> None:  # noqa: C901
 
             st.markdown(cache_entry['cond_scores_html'], unsafe_allow_html=True)
 
-    # ---------- save helper was moved to module scope (_build_payload) ----------
+    # ------------------------------------------------------------------
+    # Unified Action Buttons Row: Flag | Clear | Save | Refresh
+    # ------------------------------------------------------------------
 
-    # Clear/Save buttons - recalculate validation for buttons that may be affected by UI interactions (from legacy)
-    cs_left, cs_clear, cs_save, cs_right = st.columns([3, 1, 1, 3], gap="small")
+    current_validation = ui.can_move_on()  # refresh validation state
 
-    with cs_clear:
-        if st.button("🗑️ Clear Labels",
-                     use_container_width=True,
-                     key="btn_clear"):
+    flag_col, clear_col, save_col, refresh_col = st.columns([1, 1, 1, 1], gap="small")
+
+    # Flag / Unflag
+    with flag_col:
+        flag_text = "🚩 Unflag" if st.session_state.flagged else "🚩 Flag for Review"
+        flag_type = "secondary" if st.session_state.flagged else "primary"
+        if st.button(flag_text, type=flag_type, use_container_width=True, key="btn_flag"):
+            st.session_state.flagged = not st.session_state.flagged
+            st.rerun()
+
+    # Clear Labels
+    with clear_col:
+        if st.button("🗑️ Clear Labels", use_container_width=True, key="btn_clear"):
             ui.reset_session_state_to_defaults()
             st.session_state.skip_label_loading = True
             st.rerun()
 
-    # Recalculate validation for Save button in case UI interactions have changed state
-    current_validation = ui.can_move_on()
-    
-    with cs_save:
-        if st.button("💾 Save Labels",
-                     type="primary",
-                     use_container_width=True,
-                     disabled=not current_validation,
-                     key="btn_save"):
+    # Save Labels
+    with save_col:
+        if st.button("💾 Save Labels", type="primary", use_container_width=True,
+                     disabled=not current_validation, key="btn_save"):
             payload = _build_payload()
             logger.info(f"[FS] Saving labels for image {task['image_id']}")
             repo.save_labels(task["image_id"], payload, st.session_state.username)
-            # Update cache with saved data
             update_cache_with_saved_data(task["image_id"], payload)
             st.success("Saved ✔︎")
 
-    # Flag for Review button (centered) - from legacy
-    flag_left, flag_center, flag_right = st.columns([2, 1, 2], gap="small")
-    with flag_center:
-        flag_text = "🚩 Unflag" if st.session_state.flagged else "🚩 Flag for Review"
-        flag_type = "secondary" if st.session_state.flagged else "primary"
-        if st.button(flag_text,
-                     type=flag_type,
-                     use_container_width=True,
-                     key="btn_flag"):
-            st.session_state.flagged = not st.session_state.flagged
-            st.rerun()
-
-    # Refresh button - force reload from Firestore
-    refresh_left, refresh_center, refresh_right = st.columns([2, 1, 2], gap="small")
-    with refresh_center:
-        if st.button("🔄 Refresh from Firestore", 
-                     type="secondary",
-                     use_container_width=True,
-                     key="btn_refresh"):
-            # Force reload from Firestore by clearing cache
+    # Refresh from Firestore
+    with refresh_col:
+        if st.button("🔄 Refresh", type="secondary", use_container_width=True, key="btn_refresh"):
             clear_cache()
-            st.session_state._last_loaded_id = None  # Force reload
+            st.session_state._last_loaded_id = None  # force reload on rerun
             st.rerun()
 
     # ------------------------------------------------------------------
@@ -1087,7 +1082,7 @@ def _html_image_from_b64(
     # ------------------------------------------------------------------
     # FORCED IMAGE DIMENSIONS  (set to None to fall back to old scaling)
     # ------------------------------------------------------------------
-    TARGET_W: int | None = 1200  # e.g. 1200 px wide
+    TARGET_W: int | None = 1000  # e.g. 1200 px wide
     TARGET_H: int | None = 500   # e.g. 700  px tall
 
     if TARGET_W is not None and TARGET_H is not None:
@@ -1118,7 +1113,7 @@ def _html_image_from_b64(
     ) if admin else ""
 
     return (
-        f"<div style='display:flex;justify-content:center;align-items:center;width:100%;margin:10px 0;'>"
+        f"<div style='display:flex;justify-content:center;align-items:center;width:100%;margin:0 0 2px 0;'>"
         f"<div style='text-align:center;'>"
         f"<img src='data:image/jpeg;base64,{img_b64}' "
         f"style='width:{disp_w}px;height:{disp_h}px;display:block;margin:0 auto;object-fit:contain;' />"
@@ -1215,7 +1210,7 @@ def _inject_compact_css() -> None:
             z-index: 1000;
             background: var(--background-color, #fff);
             box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            padding: 1rem 1rem 0.5rem 1rem; /* horizontal padding */
+            padding: 1rem 1rem 0 1rem; /* no bottom padding */
             margin: 0;
             border-bottom: 1px solid rgba(0,0,0,0.1);
         }
@@ -1223,7 +1218,7 @@ def _inject_compact_css() -> None:
         .sticky-header-fade {
             position: absolute;
             left: 0; right: 0; bottom: 0;
-            height: 24px;
+            height: 8px; /* even shorter fade */
             background: linear-gradient(to bottom, rgba(255,255,255,0.95) 60%, rgba(255,255,255,0));
             pointer-events: none;
         }
