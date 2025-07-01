@@ -176,38 +176,45 @@ def show_login_gate():
     """Show login gate before proceeding to main app."""
     st.set_page_config(page_title="Property Labeler – Login", layout="wide")
     _inject_compact_css()
-    
-    st.title("🏠 Property Image Labeling Tool – Login")
-    st.markdown("Please enter the credentials provided to you by your supervisor.")
-    
-    # Center the input widgets
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        username = st.text_input("Username", key="login_username")
-        password = st.text_input("Password", type="password", key="login_password")
-        
-        if st.button("Log in", disabled=not (username and password), use_container_width=True):
-            snap = auth.get_user_doc(username)
-            if not snap.exists:
-                st.error("Unknown user or password")
-                return
 
-            data = snap.to_dict() or {}
-            stored_hash = data.get("password_hash", "")
-            if not stored_hash or not auth.verify_pw(password, stored_hash):
-                st.error("Invalid password or password")
-                return
+    # Wrap the entire login UI in a disposable container so we can fully clear it
+    login_box = st.container()
 
-            if not data.get("enabled", True):
-                st.error("Account disabled, please contact your supervisor")
-                return
+    with login_box:
+        st.title("🏠 Property Image Labeling Tool – Login")
+        st.markdown("Please enter the credentials provided to you by your supervisor.")
 
-            # Success – populate session and reload the app
-            st.session_state.username = username
-            # Store user role for conditional UI rendering (default to 'labeler')
-            st.session_state.role = data.get("role", "labeler")
-            st.session_state.authenticated = True
-            st.rerun()
+        # Center the input widgets
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input("Password", type="password", key="login_password")
+            
+            if st.button("Log in", disabled=not (username and password), use_container_width=True):
+                snap = auth.get_user_doc(username)
+                if not snap.exists:
+                    st.error("Unknown user or password")
+                    return
+
+                data = snap.to_dict() or {}
+                stored_hash = data.get("password_hash", "")
+                if not stored_hash or not auth.verify_pw(password, stored_hash):
+                    st.error("Invalid password or password")
+                    return
+
+                if not data.get("enabled", True):
+                    st.error("Account disabled, please contact your supervisor")
+                    return
+
+                # Success – populate session and reload the app
+                st.session_state.username = username
+                # Store user role for conditional UI rendering (default to 'labeler')
+                st.session_state.role = data.get("role", "labeler")
+                st.session_state.authenticated = True
+
+                # Clear the login UI immediately to minimise flash before rerun
+                login_box.empty()
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +247,13 @@ def main() -> None:  # noqa: C901
         show_login_gate()
         return
 
+    # ------------------------------------------------------------------
+    # HEADER CONTAINER – we will populate it later once image and metadata
+    # are available.  We purposely leave it empty now to avoid extra DOM
+    # nodes that could linger.
+    # ------------------------------------------------------------------
+    header_container = st.container()
+
     # Determine current user's role
     is_admin = st.session_state.get("role") == "admin"
 
@@ -269,10 +283,6 @@ def main() -> None:  # noqa: C901
 
     st.set_page_config(page_title="Property Labeler – prototype", layout="wide")
     _inject_compact_css()
-    st.title("🏠 Property Image Labeling Tool – prototype")
-
-    # Display logged-in user (read-only)
-    st.markdown(f"**Logged in as:** `{st.session_state.username}`")
 
     # 1️⃣ acquire or resume a task ------------------------------------------------
     task = st.session_state.current_task
@@ -492,11 +502,7 @@ def main() -> None:  # noqa: C901
             ui_state = build_complete_ui_state()
             cache_task_data(image_id, task, {}, ui_state)
 
-    # Show repository/debug info only to admins
-    if is_admin:
-        st.markdown(
-            f"**Repo mode:** `{mode}`\t|\t**image_id:** `{task['image_id']}`\t|\tstatus: {task['status']}"
-        )
+    # Admin info will be displayed in sticky header
 
     # Refresh cached ui_state snapshot (no GUI output)
     _update_cache_ui_state(update_timestamp=True)
@@ -512,8 +518,9 @@ def main() -> None:  # noqa: C901
         "hit": hit,
     }
 
-    # 2️⃣ display image ----------------------------------------------------------
+    # 2️⃣ display image in sticky header ----------------------------------------------------------
     image_displayed = False
+    image_html = ""
 
     cache_entry = st.session_state.task_cache
 
@@ -553,8 +560,7 @@ def main() -> None:  # noqa: C901
         b64: str = cache_entry['image_b64']  # type: ignore[assignment]
         w, h = cache_entry['image_meta']
         logger.info("[PERF] base64 path used")
-        html = _html_image_from_b64(b64, w, h, "Cache", task['image_id'], admin=is_admin)
-        st.markdown(html, unsafe_allow_html=True)
+        image_html = _html_image_from_b64(b64, w, h, "Cache", task['image_id'], admin=is_admin)
         image_displayed = True
     else:
         # Try each image source and cache the first successful bytes download
@@ -571,8 +577,7 @@ def main() -> None:  # noqa: C901
                 # Pre-compute & store heavy transforms once
                 img_b64 = base64.b64encode(img_bytes).decode()
 
-                html = _html_image_from_b64(img_b64, img.size[0], img.size[1], source_name, task['image_id'], admin=is_admin)
-                st.markdown(html, unsafe_allow_html=True)
+                image_html = _html_image_from_b64(img_b64, img.size[0], img.size[1], source_name, task['image_id'], admin=is_admin)
                 image_displayed = True
 
                 # Cache bytes & meta for future reruns
@@ -587,9 +592,12 @@ def main() -> None:  # noqa: C901
             except Exception as e:
                 st.warning(f"⚠️ Responsive sizing failed for {source_name}, trying simple display: {e}")
                 try:
+                    # For simple mode, we'll use st.image but need to handle it differently
                     st.image(url, use_container_width=True)
                     st.success(f"✅ Successfully displayed image via {source_name} (simple mode)")
                     image_displayed = True
+                    # Create a placeholder HTML for the sticky header
+                    image_html = f"<div style='text-align:center;padding:1rem;'><p>Image loaded via {source_name} (simple mode)</p></div>"
                     break
                 except Exception as e:
                     st.error(f"❌ Failed to display image via {source_name}: {e}")
@@ -626,6 +634,22 @@ def main() -> None:  # noqa: C901
                 st.rerun()
         
         st.stop()  # Don't proceed with the rest of the app
+
+    # Update the early header placeholder with the final version (includes image)
+    header_container.empty()
+    with header_container:
+        render_sticky_header(image_html, st.session_state.username, is_admin, mode, task)
+
+    # Dynamically offset subsequent content so it starts below the sticky header
+    spacer_px: int
+    if cache_entry.get('image_meta'):
+        w, h = cache_entry['image_meta']  # type: ignore[assignment]
+        spacer_px = _compute_display_height(w, h) + 115  # tighter header allowance
+    else:
+        # Fallback if image dimensions are unavailable
+        print("no image meta, using fallback")
+        spacer_px = 600
+    _inject_dynamic_spacer(spacer_px)
 
     # ------------------------------------------------------------------
     # Restore feature state EARLY - before UI
@@ -1060,21 +1084,32 @@ def _html_image_from_b64(
 ) -> str:
     """Return HTML snippet using a pre-computed base64 string."""
 
-    MIN_W, MAX_W, MIN_H, MAX_H = 800, 1200, 800, 1200
-    disp_w, disp_h = img_width, img_height
+    # ------------------------------------------------------------------
+    # FORCED IMAGE DIMENSIONS  (set to None to fall back to old scaling)
+    # ------------------------------------------------------------------
+    TARGET_W: int | None = 1200  # e.g. 1200 px wide
+    TARGET_H: int | None = 500   # e.g. 700  px tall
 
-    if disp_w < MIN_W:
-        f = MIN_W / disp_w
-        disp_w, disp_h = MIN_W, int(disp_h * f)
-    if disp_w > MAX_W:
-        f = MAX_W / disp_w
-        disp_w, disp_h = MAX_W, int(disp_h * f)
-    if disp_h > MAX_H:
-        f = MAX_H / disp_h
-        disp_h, disp_w = MAX_H, int(disp_w * f)
-    if disp_h < MIN_H:
-        f = MIN_H / disp_h
-        disp_h, disp_w = MIN_H, int(disp_w * f)
+    if TARGET_W is not None and TARGET_H is not None:
+        # Hard-override, ignore original aspect ratio
+        disp_w, disp_h = TARGET_W, TARGET_H
+    else:
+        # ------- legacy min/max scaling logic (kept for reference) -------
+        # MIN_W, MAX_W, MIN_H, MAX_H = 400, 800, 400, 800
+        # disp_w, disp_h = img_width, img_height
+        # if disp_w < MIN_W:
+        #     f = MIN_W / disp_w
+        #     disp_w, disp_h = MIN_W, int(disp_h * f)
+        # if disp_w > MAX_W:
+        #     f = MAX_W / disp_w
+        #     disp_w, disp_h = MAX_W, int(disp_h * f)
+        # if disp_h > MAX_H:
+        #     f = MAX_H / disp_h
+        #     disp_h, disp_w = MAX_H, int(disp_w * f)
+        # if disp_h < MIN_H:
+        #     f = MIN_H / disp_h
+        #     disp_h, disp_w = MIN_H, int(disp_w * f)
+        disp_w, disp_h = img_width, img_height  # no scaling if both targets None
 
     meta = (
         f"<p style='text-align:center;margin-top:10px;color:#666;'>"
@@ -1170,8 +1205,124 @@ def _inject_compact_css() -> None:
         /* NEW: Pull overall content closer to the top */
         .block-container { padding-top:0.5rem !important; padding-bottom:0.5rem !important; }
         header[data-testid="stHeader"] { height:0rem; padding:0rem; }
+        
+        /* Sticky header styles */
+        .sticky-header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            z-index: 1000;
+            background: var(--background-color, #fff);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 1rem 1rem 0.5rem 1rem; /* horizontal padding */
+            margin: 0;
+            border-bottom: 1px solid rgba(0,0,0,0.1);
+        }
+        .header-row { display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap; }
+        .sticky-header-fade {
+            position: absolute;
+            left: 0; right: 0; bottom: 0;
+            height: 24px;
+            background: linear-gradient(to bottom, rgba(255,255,255,0.95) 60%, rgba(255,255,255,0));
+            pointer-events: none;
+        }
+        /* Dark mode support for sticky header */
+        @media (prefers-color-scheme: dark) {
+            .sticky-header {
+                background: var(--background-color, #0e1117);
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }
+            .sticky-header-fade {
+                background: linear-gradient(to bottom, rgba(14,17,23,0.95) 60%, rgba(14,17,23,0));
+            }
+        }
+        /* inline code badge */
+        .code-inline { font-family: monospace; background: rgba(135,131,120,0.15); padding:2px 4px; border-radius:4px; }
         </style>
         """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sticky_header(image_html: str, username: str, is_admin: bool = False, repo_mode: str = "", task: dict = None):
+    """Render the title, user info, and image in a sticky header container."""
+    # Build single-line info row to save vertical space
+    info_parts = [
+        "<span style='font-weight:600;'>Logged in as:</span> "
+        f"<span class='code-inline'>{username}</span>"
+    ]
+
+    if is_admin and task:
+        info_parts.extend([
+            "| <span style='font-weight:600;'>Repo mode:</span> ",
+            f"<span class='code-inline'>{repo_mode}</span>",
+            "| <span style='font-weight:600;'>image_id:</span> ",
+            f"<span class='code-inline'>{task['image_id']}</span>",
+            "| <span style='font-weight:600;'>status:</span> ",
+            f"<span class='code-inline'>{task['status']}</span>",
+        ])
+
+    info_html = "".join(info_parts)
+
+    st.markdown(
+        f"""
+        <div class="sticky-header">
+            <div class="header-row">
+                <h1 style="margin:0;">🏠 Property Image Labeling Tool – prototype</h1>
+                <div style="font-size:0.85rem;">{info_html}</div>
+            </div>
+            {image_html}
+            <div class="sticky-header-fade"></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helper: compute displayed image height (mirrors _html_image_from_b64 logic)
+# ---------------------------------------------------------------------------
+
+def _compute_display_height(img_width: int, img_height: int) -> int:
+    """Calculate the height the image will be shown at after the scaling rules.
+
+    This mirrors the logic in `_html_image_from_b64` so we can derive an accurate
+    spacer value for the sticky header.
+    """
+    TARGET_H: int | None = 500  # keep in sync with _html_image_from_b64
+
+    if TARGET_H is not None:
+        return TARGET_H
+
+    # Legacy scaling path (commented for reference)
+    # MIN_W, MAX_W, MIN_H, MAX_H = 800, 1200, 800, 1200
+    # disp_w, disp_h = img_width, img_height
+    # if disp_w < MIN_W:
+    #     f = MIN_W / disp_w
+    #     disp_w, disp_h = MIN_W, int(disp_h * f)
+    # if disp_w > MAX_W:
+    #     f = MAX_W / disp_w
+    #     disp_w, disp_h = MAX_W, int(disp_h * f)
+    # if disp_h > MAX_H:
+    #     f = MAX_H / disp_h
+    #     disp_h, disp_w = MAX_H, int(disp_w * f)
+    # if disp_h < MIN_H:
+    #     f = MIN_H / disp_h
+    #     disp_h, disp_w = MIN_H, int(disp_w * f)
+    # return disp_h
+
+    return img_height  # fallback: original height
+
+
+# ---------------------------------------------------------------------------
+# Helper: inject dynamic spacer so widgets render below sticky header
+# ---------------------------------------------------------------------------
+
+def _inject_dynamic_spacer(pixels: int) -> None:
+    """Add CSS that offsets Streamlit's content by *pixels* so it starts below the header."""
+    st.markdown(
+        f"<style>div.block-container{{padding-top:{pixels}px !important;}}</style>",
         unsafe_allow_html=True,
     )
 
