@@ -981,7 +981,7 @@ def build_contextual_attribute_ui():
             st.rerun()
         
         # Count completed attributes
-        if choice:
+        if choice != "":
             completed_attrs += 1
     
     # Save attribute state after UI is built
