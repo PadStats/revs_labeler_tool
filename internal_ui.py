@@ -332,43 +332,56 @@ def save_attribute_state():
     """Save current attribute selections to persistent storage"""
     complete = get_complete_chains()
     
-    # Only save state for currently valid locations
-    current_valid_keys = set()
-    
+    # Find the first location key (since we now have one set of attributes per image)
+    first_location_key = None
     for chain_idx, chain in enumerate(complete):
         if not chain:
             continue
             
         # Get the leaf location name for this chain
-        leaf_location = chain[-1] if chain[-1] != "N/A" else chain[-2] if len(chain) > 1 else None
+        chain_values = list(chain.values()) if isinstance(chain, dict) else list(chain)
+        if not chain_values:
+            continue
+        
+        if chain_values[-1] != "N/A":
+            leaf_location = chain_values[-1]
+        elif len(chain_values) > 1:
+            leaf_location = chain_values[-2]
+        else:
+            leaf_location = None
+        
         if not leaf_location:
             continue
             
-        # Create a unique key for this location chain
-        location_key = f"loc_{chain_idx}_{leaf_location}"
-        
-        # Find relevant attributes for this location
-        relevant = set()
-        for attr, locs in ATTRIBUTE_RULES.items():
-            if any(loc in step for step in chain for loc in locs):
-                relevant.add(attr)
-        
-        if not relevant:
+        first_location_key = f"loc_{chain_idx}_{leaf_location}"
+        break
+    
+    if not first_location_key:
+        return
+    
+    # Collect all relevant attributes across all locations
+    all_relevant_attrs = set()
+    for chain in complete:
+        if not chain:
             continue
         
-        # Save each attribute for this location
-        for attr in relevant:
-            persistent_key = f"persistent_{location_key}_{attr}"
-            current_valid_keys.add(persistent_key)
-            
-            # Get current value from location_attributes
-            current_value = st.session_state.location_attributes.get(location_key, {}).get(attr, "")
-            st.session_state.persistent_attribute_state[persistent_key] = current_value
+        # Find relevant attributes for this location
+        for attr, locs in ATTRIBUTE_RULES.items():
+            if any(loc in step for step in chain for loc in locs):
+                all_relevant_attrs.add(attr)
     
-    # Clean up persistent state for locations that are no longer valid
+    # Save each attribute to persistent storage
+    for attr in all_relevant_attrs:
+        persistent_key = f"persistent_{first_location_key}_{attr}"
+        
+        # Get current value from location_attributes
+        current_value = st.session_state.location_attributes.get(first_location_key, {}).get(attr, "")
+        st.session_state.persistent_attribute_state[persistent_key] = current_value
+    
+    # Clean up persistent state for old location keys
     keys_to_remove = []
     for key in st.session_state.persistent_attribute_state:
-        if key.startswith('persistent_loc_') and key not in current_valid_keys:
+        if key.startswith('persistent_loc_') and not key.startswith(f'persistent_{first_location_key}_'):
             keys_to_remove.append(key)
     
     for key in keys_to_remove:
@@ -378,35 +391,55 @@ def restore_attribute_state():
     """Restore attribute selections from persistent storage"""
     complete = get_complete_chains()
     
+    # Find the first location key (since we now have one set of attributes per image)
+    first_location_key = None
     for chain_idx, chain in enumerate(complete):
         if not chain:
             continue
             
         # Get the leaf location name for this chain
-        leaf_location = chain[-1] if chain[-1] != "N/A" else chain[-2] if len(chain) > 1 else None
+        chain_values = list(chain.values()) if isinstance(chain, dict) else list(chain)
+        if not chain_values:
+            continue
+        
+        if chain_values[-1] != "N/A":
+            leaf_location = chain_values[-1]
+        elif len(chain_values) > 1:
+            leaf_location = chain_values[-2]
+        else:
+            leaf_location = None
+        
         if not leaf_location:
             continue
             
-        # Create a unique key for this location chain
-        location_key = f"loc_{chain_idx}_{leaf_location}"
-        
-        # Initialize this location's attributes in session state if needed
-        if location_key not in st.session_state.location_attributes:
-            st.session_state.location_attributes[location_key] = {}
+        first_location_key = f"loc_{chain_idx}_{leaf_location}"
+        break
+    
+    if not first_location_key:
+        return
+    
+    # Initialize attributes in session state if needed
+    if first_location_key not in st.session_state.location_attributes:
+        st.session_state.location_attributes[first_location_key] = {}
+    
+    # Collect all relevant attributes across all locations
+    all_relevant_attrs = set()
+    for chain in complete:
+        if not chain:
+            continue
         
         # Find relevant attributes for this location
-        relevant = set()
         for attr, locs in ATTRIBUTE_RULES.items():
             if any(loc in step for step in chain for loc in locs):
-                relevant.add(attr)
+                all_relevant_attrs.add(attr)
+    
+    # Restore each attribute from persistent storage
+    for attr in all_relevant_attrs:
+        persistent_key = f"persistent_{first_location_key}_{attr}"
         
-        # Restore each attribute from persistent storage
-        for attr in relevant:
-            persistent_key = f"persistent_{location_key}_{attr}"
-            
-            # Only restore if not already set and exists in persistent storage
-            if attr not in st.session_state.location_attributes[location_key] and persistent_key in st.session_state.persistent_attribute_state:
-                st.session_state.location_attributes[location_key][attr] = st.session_state.persistent_attribute_state[persistent_key]
+        # Only restore if not already set and exists in persistent storage
+        if attr not in st.session_state.location_attributes[first_location_key] and persistent_key in st.session_state.persistent_attribute_state:
+            st.session_state.location_attributes[first_location_key][attr] = st.session_state.persistent_attribute_state[persistent_key]
 
 
 def save_condition_state():
@@ -852,88 +885,105 @@ def build_feature_ui():
 
 
 def build_contextual_attribute_ui():
+    print("DEBUG: build_contextual_attribute_ui CALLED")
     st.markdown("### 🏷️ Contextual Attributes")
     complete = get_complete_chains()
     if not complete:
         st.info("👆 Complete locations first.")
         return
     
-    # Restore attribute state before building UI
+    print("DEBUG: location_attributes BEFORE restore:", st.session_state.location_attributes)
     restore_attribute_state()
+    print("DEBUG: location_attributes AFTER restore:", st.session_state.location_attributes)
+    
+    # Collect all relevant attributes across all locations
+    all_relevant_attrs = set()
+    for chain in complete:
+        if not chain:
+            continue
+        
+        # Find relevant attributes for this location
+        for attr, locs in ATTRIBUTE_RULES.items():
+            if any(loc in step for step in chain for loc in locs):
+                all_relevant_attrs.add(attr)
+    
+    if not all_relevant_attrs:
+        st.info("No attributes apply to the selected locations.")
+        return
     
     # Track completion status
-    total_attrs = 0
+    total_attrs = len(all_relevant_attrs)
     completed_attrs = 0
     
-    # Process each location chain separately
+    # Use the first location key for storing attributes (since we now have one set per image)
+    first_location_key = None
     for chain_idx, chain in enumerate(complete):
         if not chain:
             continue
-            
+        
         # Get the leaf location name for this chain
-        leaf_location = chain[-1] if chain[-1] != "N/A" else chain[-2] if len(chain) > 1 else None
+        chain_values = list(chain.values()) if isinstance(chain, dict) else list(chain)
+        if not chain_values:
+            continue
+        
+        if chain_values[-1] != "N/A":
+            leaf_location = chain_values[-1]
+        elif len(chain_values) > 1:
+            leaf_location = chain_values[-2]
+        else:
+            leaf_location = None
+        
         if not leaf_location:
             continue
-            
-        # Create a unique key for this location chain
-        location_key = f"loc_{chain_idx}_{leaf_location}"
         
-        # Find relevant attributes for this location
-        relevant = set()
-        for attr, locs in ATTRIBUTE_RULES.items():
-            if any(loc in step for step in chain for loc in locs):
-                relevant.add(attr)
-                
-        if not relevant:
-            continue
-            
-        # Initialize this location's attributes in session state if needed
-        if location_key not in st.session_state.location_attributes:
-            st.session_state.location_attributes[location_key] = {}
-            
-        # Display location name as header
-        st.write(f"**📍 {leaf_location}:**")
+        first_location_key = f"loc_{chain_idx}_{leaf_location}"
+        break
+    
+    if not first_location_key:
+        st.error("No valid location found for attributes.")
+        return
+    
+    # Initialize attributes in session state if needed
+    if first_location_key not in st.session_state.location_attributes:
+        st.session_state.location_attributes[first_location_key] = {}
+    
+    # Display attributes in a single section
+    attr_map = LOCATION_TAXONOMY.get("attributes", {})
+    for attr in sorted(all_relevant_attrs):
+        opts = attr_map.get(attr, [])
+        disp = attr.replace("_", " ").title()
         
-        # Display attributes for this location
-        attr_map = LOCATION_TAXONOMY.get("attributes", {})
-        for attr in sorted(relevant):
-            total_attrs += 1
-            opts = attr_map.get(attr, [])
-            disp = attr.replace("_", " ").title()
-            
-            # Get current value with empty string as default (forces selection)
-            current_value = st.session_state.location_attributes[location_key].get(attr, "")
-            
-            # Calculate index - default to 0 (blank/empty option)
-            idx = 0
-            if current_value == "N/A":
-                idx = 1  # N/A is at index 1
-            elif current_value in opts:
-                idx = opts.index(current_value) + 2  # +2 because we add blank and N/A options
-            
-            # Create a unique widget key that includes the chain index and attribute
-            widget_key = f"attr_{location_key}_{attr}_{st.session_state.widget_refresh_counter}"
-            
-            # Display the dropdown with a blank first option
-            choice = st.selectbox(
-                disp, 
-                [""] + ["N/A"] + opts,  # Blank first option, then N/A, then actual options
-                index=idx,
-                key=widget_key
-            )
-            
-            # Update the selection immediately in session state
-            old_value = st.session_state.location_attributes[location_key].get(attr, "")
-            if choice != old_value:
-                st.session_state.location_attributes[location_key][attr] = choice
-                # Force immediate UI update
-                st.rerun()
-            
-            # Count completed attributes
-            if choice:
-                completed_attrs += 1
-                
-        st.markdown("---")
+        # Get current value with empty string as default (forces selection)
+        current_value = st.session_state.location_attributes[first_location_key].get(attr, "")
+        
+        # Calculate index - default to 0 (blank/empty option)
+        idx = 0
+        if current_value == "N/A":
+            idx = 1  # N/A is at index 1
+        elif current_value in opts:
+            idx = opts.index(current_value) + 2  # +2 because we add blank and N/A options
+        
+        # Create a unique widget key
+        widget_key = f"attr_{attr}_{st.session_state.widget_refresh_counter}"
+        
+        # Display the dropdown with a blank first option
+        choice = st.selectbox(
+            disp, 
+            [""] + ["N/A"] + opts,  # Blank first option, then N/A, then actual options
+            index=idx,
+            key=widget_key
+        )
+        
+        # Update the selection immediately in session state
+        old_value = st.session_state.location_attributes[first_location_key].get(attr, "")
+        if choice != old_value:
+            st.session_state.location_attributes[first_location_key][attr] = choice
+            # Force immediate UI update
+            st.rerun()
+        
+        # Count completed attributes
+        if choice:
+            completed_attrs += 1
     
     # Save attribute state after UI is built
     save_attribute_state()
@@ -1221,9 +1271,56 @@ def can_move_on() -> bool:
                 return False
 
     # 3) Every attribute must have a selection (including N/A)
-    for location_key, attrs in st.session_state.location_attributes.items():
-        for attr, value in attrs.items():
-            if not value:  # Empty string means no selection
+    # Get all complete location chains to check required attributes
+    complete = get_complete_chains()
+    
+    # Find the first location key (since we now have one set of attributes per image)
+    first_location_key = None
+    for chain_idx, chain in enumerate(complete):
+        if not chain:
+            continue
+        
+        # Get the leaf location name for this chain
+        chain_values = list(chain.values()) if isinstance(chain, dict) else list(chain)
+        if not chain_values:
+            continue
+        
+        if chain_values[-1] != "N/A":
+            leaf_location = chain_values[-1]
+        elif len(chain_values) > 1:
+            leaf_location = chain_values[-2]
+        else:
+            leaf_location = None
+        
+        if not leaf_location:
+            continue
+        
+        first_location_key = f"loc_{chain_idx}_{leaf_location}"
+        break
+    
+    if first_location_key:
+        # Collect all relevant attributes across all locations
+        all_relevant_attrs = set()
+        for chain in complete:
+            if not chain:
+                continue
+            
+            # Find relevant attributes for this location
+            for attr, locs in ATTRIBUTE_RULES.items():
+                if any(loc in step for step in chain for loc in locs):
+                    all_relevant_attrs.add(attr)
+        
+        # Check that each relevant attribute has a value (including N/A)
+        for attr in all_relevant_attrs:
+            value = st.session_state.location_attributes.get(first_location_key, {}).get(attr, "")
+            
+            # Handle different value types:
+            # - Empty string "" = not selected (invalid)
+            # - "N/A" = valid selection
+            # - Any other string = valid selection  
+            # - False (boolean) = valid selection
+            # - True (boolean) = valid selection
+            if value == "":  # Only empty string is invalid
                 return False
 
     # 4) Condition scores validation - simplified
@@ -1243,21 +1340,36 @@ def can_move_on() -> bool:
 def save_current_labels(image_paths: List[str], df: pd.DataFrame, user_name: str) -> pd.DataFrame:
     img_path = image_paths[st.session_state.index]
     
-    # Collect all feature labels from current selections
-    all_features = set()
+    # Collect all feature labels from current selections with structured format
+    all_features = []
     leaves = get_leaf_locations()
     for loc in leaves:
         if loc not in FEATURE_TAXONOMY:
             continue
         for category in FEATURE_TAXONOMY[loc]:
             sel_key = f"sel_{loc}_{category}"
-            features = st.session_state.get(sel_key, [])
-            all_features.update(features)
+            na_key = f"na_{loc}_{category}"
+            
+            # Get current state
+            selections = st.session_state.get(sel_key, [])
+            is_na = st.session_state.get(na_key, False)
+            
+            # If N/A is checked, don't save anything for this category
+            if is_na:
+                continue
+            
+            # If no selections are made and "None" is available as an option, save "None"
+            if not selections and "None" in FEATURE_TAXONOMY[loc][category]:
+                all_features.append(f"{loc}:{category}:None")
+            else:
+                # Save the actual selections with location and category context
+                for feature in selections:
+                    all_features.append(f"{loc}:{category}:{feature}")
     
     data = {
         "image_path": img_path,
         "spatial_labels": "|".join(chains_to_label_strings()),
-        "feature_labels": "|".join(sorted(all_features)),
+        "feature_labels": "|".join(sorted(all_features)),  # Now contains "Location:Category:Feature" format
         "notes": st.session_state.notes,
         "flagged": st.session_state.flagged,
         "labeled_by": user_name,
@@ -1267,22 +1379,17 @@ def save_current_labels(image_paths: List[str], df: pd.DataFrame, user_name: str
         "improvement_condition": st.session_state.condition_scores["improvement_condition"]
     }
     
-    # Convert location-specific attributes to the format expected by the CSV
-    # We'll use a pipe-separated format: "location1:value1|location2:value2"
+    # Convert attributes to the format expected by the CSV
+    # Since we now have one set of attributes per image, we just need the first value
     for attr in LOCATION_TAXONOMY.get("attributes", {}):
-        attr_values = []
+        # Find the first location that has this attribute set
         for location_key, attrs in st.session_state.location_attributes.items():
             if attr in attrs and attrs[attr]:
-                # Extract location name from the key (format: loc_idx_name)
-                loc_parts = location_key.split('_', 2)
-                if len(loc_parts) >= 3:
-                    location_name = loc_parts[2]
-                    attr_values.append(f"{location_name}:{attrs[attr]}")
-        
-        if attr_values:
-            data[attr] = "|".join(attr_values)
-        else:
-            data[attr] = None
+                if attrs[attr] == "N/A":
+                    data[attr] = None  # Save N/A as null
+                else:
+                    data[attr] = attrs[attr]  # Save simple value
+                break  # Take the first value since all locations should have the same value
     
     new_df = pd.DataFrame([data])
     out_df = pd.concat([df[df["image_path"] != img_path], new_df], ignore_index=True)

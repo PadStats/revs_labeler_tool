@@ -14,6 +14,7 @@ from labeler_backend import get_repo
 import ui_components as ui
 from labeler_backend.bb_resolver import BackblazeResolverError  # new import
 import auth  # NEW: authentication helpers
+from taxonomy import ATTRIBUTE_RULES  # Import for attribute loading logic
 
 # Constants
 HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "10"))  # How many recent images to show in history
@@ -136,7 +137,7 @@ def build_complete_ui_state() -> dict:
     cache_keys = [
         'location_chains', 'notes', 'flagged', 'location_attributes',
         'condition_scores', 'property_condition_na', 'property_condition_confirmed',
-        'persistent_feature_state', 'persistent_condition_state',
+        'persistent_feature_state', 'persistent_condition_state', 'persistent_attribute_state',
         'widget_refresh_counter'
     ]
     
@@ -236,6 +237,7 @@ def _load_env() -> None:
 
 
 def main() -> None:  # noqa: C901
+    print("DEBUG: main UI function CALLED")
     """Slimmed-down but functional prototype using LabelRepo."""
 
     _init_state()  # Initialize our custom session state
@@ -367,35 +369,150 @@ def main() -> None:  # noqa: C901
             # Feature selections
             st.session_state.persistent_feature_state = {}
             features_raw = existing.get("feature_labels", [])
+            
+            # Parse features from the new structured format "Location:Category:Feature"
+            # or fall back to legacy flat format for backward compatibility
+            feature_by_location_category = {}  # {(location, category): [features]}
+            
             if isinstance(features_raw, str):
-                feature_set = set(features_raw.split("|")) if features_raw else set()
+                feature_list = features_raw.split("|") if features_raw else []
             else:
-                feature_set = set(features_raw)
+                feature_list = features_raw
+            
+            # Check if this is the new structured format (contains ":")
+            is_structured_format = any(":" in feature for feature in feature_list)
+            
+            if is_structured_format:
+                # New structured format: "Location:Category:Feature"
+                for feature_entry in feature_list:
+                    if ":" in feature_entry:
+                        parts = feature_entry.split(":", 2)  # Split into max 3 parts
+                        if len(parts) == 3:
+                            location, category, feature = parts
+                            if (location, category) not in feature_by_location_category:
+                                feature_by_location_category[(location, category)] = []
+                            feature_by_location_category[(location, category)].append(feature)
+            else:
+                # Legacy flat format - convert to structured for processing
+                for loc in ui.get_leaf_locations():
+                    if loc not in ui.FEATURE_TAXONOMY:
+                        continue
+                    for category, feats in ui.FEATURE_TAXONOMY[loc].items():
+                        # Check if "None" is in the feature set for this category
+                        if "None" in feature_list and "None" in feats:
+                            feature_by_location_category[(loc, category)] = ["None"]
+                        else:
+                            # Look for actual feature selections
+                            sel = [f for f in feature_list if f in feats]
+                            if sel:
+                                feature_by_location_category[(loc, category)] = sel
+            
+            # Process the parsed features
             for loc in ui.get_leaf_locations():
                 if loc not in ui.FEATURE_TAXONOMY:
                     continue
-                for category, feats in ui.FEATURE_TAXONOMY[loc].items():
-                    sel = [f for f in feature_set if f in feats]
-                    st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = not bool(sel)
-                    st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = sel
+                for category in ui.FEATURE_TAXONOMY[loc]:
+                    if (loc, category) in feature_by_location_category:
+                        # Features were found for this category
+                        features = feature_by_location_category[(loc, category)]
+                        st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = False
+                        st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = features
+                    else:
+                        # No features found - this category was marked as N/A
+                        st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = True
+                        st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = []
 
             # Attributes
             st.session_state.location_attributes = {}
             attrs_map = existing.get("attributes", {})
             if isinstance(attrs_map, dict):
-                for attr, pipe in attrs_map.items():
-                    for part in pipe.split("|"):
-                        if ":" not in part:
+                # First, collect all attributes that are present in the database
+                loaded_attrs = set()
+                for attr, value in attrs_map.items():
+                    # Find the original attribute name (with spaces) from the normalized name
+                    original_attr = None
+                    for orig_attr in ui.LOCATION_TAXONOMY.get("attributes", {}):
+                        if orig_attr.replace(" ", "_") == attr:
+                            original_attr = orig_attr
+                            break
+                    if not original_attr:
+                        logger.warning(f"[ATTR LOAD] Could not map attribute key '{attr}' to taxonomy. Using key as-is.")
+                        original_attr = attr  # Fallback: use the Firestore key as the attribute name
+                    logger.info(f"[ATTR LOAD] Mapping Firestore key '{attr}' to UI attribute '{original_attr}' with value '{value}'")
+                    # Normalize value for UI
+                    if value is None or value == "N/A":
+                        val = "N/A"
+                    else:
+                        attr_opts = ui.LOCATION_TAXONOMY.get("attributes", {}).get(original_attr, []) if original_attr else []
+                        # If options are strings "True"/"False", convert booleans to strings
+                        if isinstance(value, bool) and all(isinstance(o, str) for o in attr_opts):
+                            val = "True" if value else "False"
+                        else:
+                            val = value
+                    # Since attributes are now image-level, not location-dependent, always use the first location key
+                    found_location = False
+                    for idx, chain in enumerate(st.session_state.location_chains):
+                        if not chain or found_location:
                             continue
-                        leaf, val = part.split(":", 1)
-                        for idx, chain in enumerate(st.session_state.location_chains):
-                            path = list(chain.values())
-                            if not path:
-                                continue
-                            leaf_name = path[-1] if path[-1] != "N/A" else path[-2]
-                            if leaf_name == leaf:
-                                key = f"loc_{idx}_{leaf}"
-                                st.session_state.location_attributes.setdefault(key, {})[attr] = val
+                        # Safely get the leaf location with proper bounds checking
+                        chain_values = list(chain.values())
+                        if not chain_values:
+                            continue
+                        if chain_values[-1] != "N/A":
+                            leaf_location = chain_values[-1]
+                        elif len(chain_values) > 1:
+                            leaf_location = chain_values[-2]
+                        else:
+                            leaf_location = None
+                        if not leaf_location:
+                            continue
+                        location_key = f"loc_{idx}_{leaf_location}"
+                        # For image-level attributes, just use the first location key
+                        st.session_state.location_attributes.setdefault(location_key, {})[original_attr] = val
+                        loaded_attrs.add((location_key, original_attr))
+                        found_location = True  # Only set for the first location
+                        break
+                
+                # Now handle missing attributes - if an attribute should be present but isn't in the database,
+                # it means it was "N/A" and we didn't save it. We need to set it to "N/A" for the UI.
+                for idx, chain in enumerate(st.session_state.location_chains):
+                    if not chain:
+                        continue
+                    
+                    # Safely get the leaf location with proper bounds checking
+                    chain_values = list(chain.values())
+                    if not chain_values:
+                        continue
+                    
+                    if chain_values[-1] != "N/A":
+                        leaf_location = chain_values[-1]
+                    elif len(chain_values) > 1:
+                        leaf_location = chain_values[-2]
+                    else:
+                        leaf_location = None
+                    
+                    if not leaf_location:
+                        continue
+                    
+                    location_key = f"loc_{idx}_{leaf_location}"
+                    
+                    # Find relevant attributes for this location
+                    relevant = set()
+                    for attr, locs in ATTRIBUTE_RULES.items():
+                        if any(loc in step for step in chain for loc in locs):
+                            relevant.add(attr)
+                    
+                    # For each relevant attribute, if it's not in the database, set it to "N/A"
+                    for attr in relevant:
+                        if (location_key, attr) not in loaded_attrs:
+                            st.session_state.location_attributes.setdefault(location_key, {})[attr] = "N/A"
+
+            # Populate persistent_attribute_state from loaded location_attributes
+            # This is needed for the restore_attribute_state() function to work properly
+            for location_key, attrs in st.session_state.location_attributes.items():
+                for attr, value in attrs.items():
+                    persistent_key = f"persistent_{location_key}_{attr}"
+                    st.session_state.persistent_attribute_state[persistent_key] = value
 
             # Condition scores
             cond = existing.get("condition_scores", {})
@@ -404,18 +521,44 @@ def main() -> None:  # noqa: C901
                 # New schema: condition_scores as object
                 prop_val = cond.get("property_condition", 3.0)
                 if prop_val is None:
+                    # Handle None values for quality and improvement condition - convert to "N/A" for UI
+                    quality_val = cond.get("quality_of_construction", "")
+                    if quality_val is None:
+                        quality_val = "N/A"
+                    elif quality_val == "N/A":
+                        quality_val = "N/A"
+                    
+                    improvement_val = cond.get("improvement_condition", "")
+                    if improvement_val is None:
+                        improvement_val = "N/A"
+                    elif improvement_val == "N/A":
+                        improvement_val = "N/A"
+                    
                     st.session_state.condition_scores = {
                         "property_condition": 3.0,
-                        "quality_of_construction": cond.get("quality_of_construction", ""),
-                        "improvement_condition": cond.get("improvement_condition", ""),
+                        "quality_of_construction": quality_val,
+                        "improvement_condition": improvement_val,
                     }
                     st.session_state.property_condition_na = True
                     st.session_state.property_condition_confirmed = False
                 else:
+                    # Handle None values for quality and improvement condition - convert to "N/A" for UI
+                    quality_val = cond.get("quality_of_construction", "")
+                    if quality_val is None:
+                        quality_val = "N/A"
+                    elif quality_val == "N/A":
+                        quality_val = "N/A"
+                    
+                    improvement_val = cond.get("improvement_condition", "")
+                    if improvement_val is None:
+                        improvement_val = "N/A"
+                    elif improvement_val == "N/A":
+                        improvement_val = "N/A"
+                    
                     st.session_state.condition_scores = {
                         "property_condition": float(prop_val),
-                        "quality_of_construction": cond.get("quality_of_construction", ""),
-                        "improvement_condition": cond.get("improvement_condition", ""),
+                        "quality_of_construction": quality_val,
+                        "improvement_condition": improvement_val,
                     }
                     st.session_state.property_condition_na = False
                     st.session_state.property_condition_confirmed = True
@@ -909,7 +1052,20 @@ def main() -> None:  # noqa: C901
         if loc in ui.FEATURE_TAXONOMY:
             for category in ui.FEATURE_TAXONOMY[loc]:
                 sel_key = f"sel_{loc}_{category}"
-                feats.extend(st.session_state.get(sel_key, []))
+                na_key = f"na_{loc}_{category}"
+                
+                # Get current state
+                selections = st.session_state.get(sel_key, [])
+                is_na = st.session_state.get(na_key, False)
+                
+                # If N/A is checked, don't show any features for this category
+                if not is_na:
+                    # Add category context to features for better display
+                    for feature in selections:
+                        if feature == "None":
+                            feats.append(f"{category}: None")
+                        else:
+                            feats.append(f"{category}: {feature}")
         feats_by_loc[loc] = feats
 
     groups = list(feats_by_loc.items())
@@ -1268,34 +1424,55 @@ def _build_payload() -> dict:
     spatial_list = ui.chains_to_label_strings()
 
     # --- feature labels ---
-    feature_set: set[str] = set()
+    feature_list: list[str] = []
     leaves = ui.get_leaf_locations()
     for loc in leaves:
         if loc not in ui.FEATURE_TAXONOMY:
             continue
         for category in ui.FEATURE_TAXONOMY[loc]:
             sel_key = f"sel_{loc}_{category}"
+            na_key = f"na_{loc}_{category}"
+            
+            # Get current state
             selections = st.session_state.get(sel_key, [])  # type: ignore[arg-type]
-            feature_set.update(selections)
+            is_na = st.session_state.get(na_key, False)
+            
+            # If N/A is checked, don't save anything for this category
+            if is_na:
+                continue
+            
+            # If no selections are made and "None" is available as an option, save "None"
+            if not selections and "None" in ui.FEATURE_TAXONOMY[loc][category]:
+                feature_list.append(f"{loc}:{category}:None")
+            else:
+                # Save the actual selections with location and category context
+                for feature in selections:
+                    feature_list.append(f"{loc}:{category}:{feature}")
 
     # --- contextual attributes ---
     attributes_map: dict[str, str] = {}
     for attr in ui.LOCATION_TAXONOMY.get("attributes", {}):
-        attr_values = []
+        # Normalize attribute name (replace spaces with underscores)
+        normalized_attr = attr.replace(" ", "_")
+        
+        # Find the first location that has this attribute set
+        # Since we now have one set of attributes per image, we just need the first value
         for loc_key, attrs in st.session_state.location_attributes.items():  # type: ignore[attr-defined]
-            if attr in attrs and attrs[attr]:
-                # key format loc_<idx>_<leaf>
-                leaf_name = loc_key.split("_", 2)[-1]
-                attr_values.append(f"{leaf_name}:{attrs[attr]}")
-        if attr_values:
-            attributes_map[attr] = "|".join(attr_values)
+            if attr in attrs and attrs[attr]:  # Has a value (including "N/A")
+                if attrs[attr] == "N/A":
+                    # Save N/A as null in the database
+                    attributes_map[normalized_attr] = None
+                else:
+                    # Save the simple value (no location prefix)
+                    attributes_map[normalized_attr] = attrs[attr]
+                break  # Take the first value since all locations should have the same value
 
     # --- condition scores ---
     cond = st.session_state.condition_scores  # type: ignore[attr-defined]
     condition_scores = {
         "property_condition": None if st.session_state.get("property_condition_na", False) else cond["property_condition"],
-        "quality_of_construction": cond["quality_of_construction"],
-        "improvement_condition": cond["improvement_condition"],
+        "quality_of_construction": None if cond["quality_of_construction"] == "N/A" else cond["quality_of_construction"],
+        "improvement_condition": None if cond["improvement_condition"] == "N/A" else cond["improvement_condition"],
     }
 
     return {
@@ -1304,7 +1481,7 @@ def _build_payload() -> dict:
         "schema_version": 1,
         "labeled_by": st.session_state.get("username", ""),
         "spatial_labels": spatial_list,  # list[str]
-        "feature_labels": sorted(feature_set),  # list[str]
+        "feature_labels": sorted(feature_list),  # list[str] with format "Location:Category:Feature"
         "attributes": attributes_map,
         "condition_scores": condition_scores,
     }

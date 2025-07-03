@@ -188,7 +188,7 @@ LOCATION_TAXONOMY = {
     },
     "attributes": {
         "furnishing status": ["furnished", "unfurnished"],
-        "Livability status": ["unfinished", "livable/linished"],
+        "livability status": ["unfinished", "livable/finished"],
         "kitchen_has_island": [True, False]
     }
 }
@@ -1067,7 +1067,7 @@ FEATURE_TAXONOMY: dict[str, dict[str, list[str]]] = {
 # Attribute rules - which attributes apply to which location types
 ATTRIBUTE_RULES = {
     "furnishing status": ["Residential Interior"],  # Only for interior spaces
-    "Livability status": ["Residential Interior", "Commercial Interior"],  # Interior spaces
+    "livability status": ["Residential Interior", "Commercial Interior"],  # Interior spaces
     "kitchen_has_island": ["Kitchen"]  # Only when Kitchen is selected
 }
 
