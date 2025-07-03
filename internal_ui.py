@@ -131,8 +131,11 @@ def get_complete_chains() -> List[List[str]]:
 def get_leaf_locations() -> Set[str]:
     leaves = set()
     for path in get_complete_chains():
-        if path and path[-1] != "N/A":
-            leaves.add(path[-1])
+        if path:
+            if path[-1] == "N/A" and len(path) > 1 and path[-2] in FEATURE_TAXONOMY:
+                leaves.add(path[-2])
+            elif path[-1] in FEATURE_TAXONOMY:
+                leaves.add(path[-1])
     return leaves
 
 
@@ -801,7 +804,12 @@ def build_feature_ui():
         return
 
     avail = [loc for loc in leaves if loc in FEATURE_TAXONOMY]
-    if not avail:
+    missing = [loc for loc in leaves if loc not in FEATURE_TAXONOMY]
+    if not avail and missing:
+        for loc in missing:
+            st.warning(f"No features defined for location: {loc}")
+        return
+    elif not avail:
         st.info("No specific features defined.")
         return
 
@@ -828,11 +836,9 @@ def build_feature_ui():
         for category in FEATURE_TAXONOMY[loc]:
             na_key  = f"na_{loc}_{category}"
             sel_key = f"sel_{loc}_{category}"
-            
             # Count as complete if either N/A is checked OR features are selected (but not both)
             is_na = st.session_state.get(na_key, False)
             has_selections = bool(st.session_state.get(sel_key, []))
-            
             # A category is complete if it has EITHER N/A OR selections (but not both)
             if (is_na and not has_selections) or (not is_na and has_selections):
                 done_cats += 1
