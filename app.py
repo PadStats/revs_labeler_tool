@@ -43,6 +43,8 @@ def _init_state() -> None:
         st.session_state.flagged = False
     if "skip_label_loading" not in st.session_state:
         st.session_state.skip_label_loading = False
+    if "navigation_history" not in st.session_state:
+        st.session_state.navigation_history = []  # type: ignore[assignment]
     
     # Initialize cache structure
     if "task_cache" not in st.session_state:
@@ -286,27 +288,48 @@ def main() -> None:  # noqa: C901
 
     # 1️⃣ acquire or resume a task ------------------------------------------------
     task = st.session_state.current_task
+    if task is None and st.session_state.get("_last_loaded_id") is not None:
+        logger.info(f"[DEBUG] WARNING: current_task is None but _last_loaded_id exists: {st.session_state.get('_last_loaded_id')}")
+    logger.info(f"[DEBUG] Task at start: {task.get('image_id') if task else 'None'} (status: {task.get('status') if task else 'N/A'})")
     if task is None:
+        logger.info(f"[DEBUG] No current task, loading new task")
         # first check if we already have a pre-loaded history stack
         hist_stack: list = st.session_state.get("history_stack", [])  # type: ignore[var-annotated]
         if hist_stack:
             task = hist_stack.pop(0)
             st.session_state.history_stack = hist_stack
             st.session_state.current_task = task
+            logger.info(f"[DEBUG] Loaded task from history stack: {task.get('image_id')} (status: {task.get('status')})")
+            # Add to navigation history when loading from history stack
+            if task.get("image_id") and task.get("image_id") not in st.session_state.navigation_history:
+                st.session_state.navigation_history.append(task.get("image_id"))
         else:
+            logger.info(f"[DEBUG] No history stack, getting next task from repo")
             task = repo.get_next_task(st.session_state.username)
             if task is None:
+                logger.info(f"[DEBUG] No next task available, falling back to labeled history")
                 # nothing in progress – fall back to labeled history
                 history = repo.get_user_history(st.session_state.username, limit=HISTORY_LIMIT)
                 if history:
                     st.session_state.history_stack = history[1:]
                     task = history[0]
                     st.session_state.current_task = task
+                    logger.info(f"[DEBUG] Loaded task from user history: {task.get('image_id')} (status: {task.get('status')})")
+                    # Add to navigation history when loading from user history
+                    if task.get("image_id") and task.get("image_id") not in st.session_state.navigation_history:
+                        st.session_state.navigation_history.append(task.get("image_id"))
                 else:
+                    logger.info(f"[DEBUG] No user history available")
                     st.success("🎉 No more images to label.")
                     return
+            else:
+                logger.info(f"[DEBUG] Got new task from repo: {task.get('image_id')} (status: {task.get('status')})")
+                # Add to navigation history when loading new task
+                if task.get("image_id") and task.get("image_id") not in st.session_state.navigation_history:
+                    st.session_state.navigation_history.append(task.get("image_id"))
 
     # ---- Load task data and rebuild session state with caching ----
+    logger.info(f"[DEBUG] Task loading condition: task={task.get('image_id') if task else 'None'}, _last_loaded_id={st.session_state.get('_last_loaded_id')}")
     if task is not None and (st.session_state.get("_last_loaded_id") != task["image_id"]):
         image_id = task["image_id"]
         
@@ -321,6 +344,9 @@ def main() -> None:  # noqa: C901
             st.session_state._last_loaded_id = image_id
 
         if existing:
+            # Update task status to labeled since we found existing labels
+            task["status"] = "labeled"
+            st.session_state.current_task = task
             ui.reset_session_state_to_defaults()
 
             # Spatial chains
@@ -629,7 +655,6 @@ def main() -> None:  # noqa: C901
                     pass  # Even if save fails, continue
                 # Clear cache for new image
                 clear_cache()
-                st.session_state.completed_stack.append(task)
                 st.session_state.current_task = None  # triggers get_next_task on rerun
                 st.rerun()
         
@@ -690,86 +715,188 @@ def main() -> None:  # noqa: C901
     can_proceed = ui.can_move_on()
 
     with nav_prev:
-        # Determine if the user has something to go back to:
-        # 1) items from this session (completed_stack) OR
-        # 2) most-recently labeled image in Firestore history.
-        has_session_prev = len(st.session_state.completed_stack) > 0
+        # Debug logging for navigation state
+        current_image_id = task.get("image_id") if task else None
+        current_status = task.get("status") if task else "N/A"
+        logger.info(f"[NAV] Previous button check - Current: {current_image_id} (status: {current_status})")
+        
+        # Initialize navigation history if not exists
+        if "navigation_history" not in st.session_state:
+            st.session_state.navigation_history = []
+        
+        # Add current image to navigation history if not already there
+        if current_image_id and current_image_id not in st.session_state.navigation_history:
+            st.session_state.navigation_history.append(current_image_id)
+            logger.info(f"[NAV] Added to history: {current_image_id}")
 
-        prev_hist: list = []
+        # Check if we have more history to go back to
         has_remote_prev = False
-        if not has_session_prev:
-            try:
-                prev_hist = repo.get_user_history(st.session_state.username, limit=1)
-                has_remote_prev = bool(prev_hist)
-            except Exception as _:
-                has_remote_prev = False
+        prev_entry = None
+        
+        try:
+            # Get full user history (not limited by HISTORY_LIMIT)
+            prev_hist = repo.get_user_history(st.session_state.username, limit=200)
+            logger.info(f"[NAV] Retrieved {len(prev_hist)} labeled images from history")
+            
+            if prev_hist:
+                # History is ordered DESCENDING (newest first)
+                # So index 0 = newest, index 1 = second newest, etc.
+                
+                if current_status == "labeled":
+                    # We're on a labeled image - find the next labeled image (older timestamp)
+                    current_idx = None
+                    for idx, entry in enumerate(prev_hist):
+                        if entry.get("image_id") == current_image_id:
+                            current_idx = idx
+                            break
+                    
+                    if current_idx is not None and current_idx + 1 < len(prev_hist):
+                        # Found current image in history, get the next one (older)
+                        prev_entry = prev_hist[current_idx + 1]
+                        has_remote_prev = True
+                        logger.info(f"[NAV] Found previous labeled image: {prev_entry.get('image_id')} (idx: {current_idx + 1})")
+                    else:
+                        logger.info(f"[NAV] Current labeled image not found in history or is oldest")
+                else:
+                    # We're on an in-progress/new image - get the most recent labeled image
+                    prev_entry = prev_hist[0]  # Newest labeled image
+                    has_remote_prev = True
+                    logger.info(f"[NAV] On in-progress image, getting most recent labeled: {prev_entry.get('image_id')}")
+            else:
+                logger.info(f"[NAV] No labeled images in history")
+                
+        except Exception as e:
+            logger.error(f"[NAV] Error getting user history: {e}")
+            has_remote_prev = False
 
-        disabled = not (has_session_prev or has_remote_prev)
+        disabled = not has_remote_prev
+        logger.info(f"[NAV] Previous button disabled: {disabled}")
 
         if st.button("⬅️ Previous",
                      use_container_width=True,
                      disabled=disabled,
                      key="btn_prev"):
+            logger.info(f"[NAV] Previous button clicked")
             clear_cache()
 
-            if has_session_prev:
-                # Use in-session stack first (fast, no network).
-                st.session_state.current_task = st.session_state.completed_stack.pop()
-                st.rerun()
+            if prev_entry:
+                image_id = prev_entry.get("image_id")
+                logger.info(f"[NAV] Loading previous image: {image_id}")
+                
+                if image_id:
+                    try:
+                        img_doc = repo.get_image_doc(image_id)
+                    except AttributeError:
+                        img_doc = None
 
-            elif has_remote_prev:
-                # Fallback: pull the most recent labeled image for the user.
-                prev_hist = repo.get_user_history(st.session_state.username, limit=1)
-                has_remote_prev = bool(prev_hist)
-                if prev_hist:
-                    hist_entry = prev_hist[0]
-                    image_id = hist_entry.get("image_id")
-                    if image_id:
-                        try:
-                            img_doc = repo.get_image_doc(image_id)  # type: ignore[attr-defined]
-                        except AttributeError:
-                            img_doc = None  # Repo does not implement helper
+                    if not img_doc:
+                        img_doc = {
+                            "image_id": image_id,
+                            "status": "labeled",
+                            "bb_url": prev_entry.get("bb_url", ""),
+                        }
 
-                        # If helper failed, fall back to minimal task dict.
-                        if not img_doc:
-                            img_doc = {
-                                "image_id": image_id,
-                                "status": "labeled",
-                                "bb_url": hist_entry.get("bb_url", ""),
-                            }
-
-                        # Ensure at least bb_url/image_url fields so downstream resolves.
-                        # We merge history data to retain saved labels snapshot.
-                        img_doc = {**hist_entry, **img_doc}
-
-                        st.session_state.current_task = img_doc
+                    # Merge history data with image doc
+                    merged_task = {**prev_entry, **img_doc}
+                    st.session_state.current_task = merged_task
+                    logger.info(f"[NAV] Set current_task to: {image_id} (status: {merged_task.get('status')})")
+                    
+                    # Clear _last_loaded_id to force reload
+                    st.session_state._last_loaded_id = None
                     st.rerun()
 
     with nav_next:
+        is_labeled_now = task.get("status") == "labeled"
+        logger.info(f"[NAV] Next button check - Current: {current_image_id} (status: {current_status}), enabled: {is_labeled_now}")
+        
         if st.button("➡️ Next",
                      use_container_width=True,
-                     disabled=not can_proceed,
+                     disabled=not is_labeled_now,
                      key="btn_next"):
-            # Save current task first
-            payload = _build_payload()
-            logger.info(f"[FS] Saving labels for image {task['image_id']} (Go)")
-            repo.save_labels(task["image_id"], payload, st.session_state.username)
-            # Update cache with saved data
-            update_cache_with_saved_data(task["image_id"], payload)
-            st.session_state.completed_stack.append(task)
+            logger.info(f"[NAV] Next button clicked")
+            
+            # ------------------------------------------------------------------
+            # Next navigation logic
+            # ------------------------------------------------------------------
+            next_task: dict | None = None
 
-            # Clear cache when moving to different image
-            clear_cache()
+            if task.get("status") == "labeled":
+                # ---- Case A: we're on a labeled image – get the *next* labeled image ----
+                try:
+                    hist = repo.get_user_history(st.session_state.username, limit=200)
+                    logger.info(f"[NAV] Retrieved {len(hist)} labeled images for next navigation")
+                except Exception as e:
+                    logger.error(f"[NAV] Error getting history for next: {e}")
+                    hist = []
 
-            # Decide where the next task comes from
-            hist_stack = st.session_state.get("history_stack", [])  # type: ignore[var-annotated]
-            if hist_stack:
-                st.session_state.current_task = hist_stack.pop(0)
-                st.session_state.history_stack = hist_stack
+                if hist:
+                    # History is ordered DESCENDING (newest first)
+                    # So to get "next" (newer), we need to go to a lower index
+                    current_idx = None
+                    for idx, entry in enumerate(hist):
+                        if entry.get("image_id") == task["image_id"]:
+                            current_idx = idx
+                            break
+                    
+                    if current_idx is not None and current_idx > 0:
+                        # Found current image, get the previous one (newer timestamp)
+                        next_entry = hist[current_idx - 1]
+                        image_id = next_entry.get("image_id")
+                        logger.info(f"[NAV] Found next labeled image: {image_id} (idx: {current_idx - 1})")
+                        
+                        if image_id:
+                            try:
+                                doc = repo.get_image_doc(image_id)
+                            except AttributeError:
+                                doc = None
+                            if not doc:
+                                doc = {
+                                    "image_id": image_id,
+                                    "status": "labeled",
+                                    "bb_url": next_entry.get("bb_url", ""),
+                                }
+                            next_task = {**next_entry, **doc}
+                    else:
+                        logger.info(f"[NAV] Current image not found in history or is newest")
+
+            # ---- Case B: no further labeled images – fall back to in-progress queue ----
+            if next_task is None:
+                logger.info(f"[NAV] No next labeled image, checking in-progress queue")
+                # Use any preloaded history_stack first (these are usually in-progress)
+                hist_stack: list = st.session_state.get("history_stack", [])
+                logger.info(f"[NAV] History stack has {len(hist_stack)} items")
+                
+                # Remove any labeled entries from the stack
+                while hist_stack and hist_stack[0].get("status") == "labeled":
+                    removed = hist_stack.pop(0)
+                    logger.info(f"[NAV] Removed labeled entry from stack: {removed.get('image_id')}")
+                
+                if hist_stack:
+                    next_task = hist_stack.pop(0)
+                    st.session_state.history_stack = hist_stack
+                    logger.info(f"[NAV] Got in-progress task from stack: {next_task.get('image_id')}")
+
+            # ---- Case C: still nothing – ask repo for a brand-new task ----
+            if next_task is None:
+                logger.info(f"[NAV] No in-progress tasks, getting new task from repo")
+                next_task = repo.get_next_task(st.session_state.username)
+                if next_task:
+                    logger.info(f"[NAV] Got new task from repo: {next_task.get('image_id')}")
+                else:
+                    logger.info(f"[NAV] No new tasks available")
+
+            # ------------------------------------------------------------------
+            # Update session & cache, no Firestore writes here
+            # ------------------------------------------------------------------
+            if next_task:
+                clear_cache()
+                st.session_state.current_task = next_task
+                st.session_state._last_loaded_id = None  # Force reload
+                logger.info(f"[NAV] Set current_task to: {next_task.get('image_id')} (status: {next_task.get('status')})")
+                st.rerun()
             else:
-                st.session_state.current_task = None  # triggers get_next_task on rerun
-
-            st.rerun()
+                logger.info(f"[NAV] No next task available")
+                st.warning("No more images available")
 
     # Current Selections Display (from legacy)
     sel_left, sel_mid, sel_right = st.columns([1, 4, 1], gap="small")
@@ -979,7 +1106,11 @@ def main() -> None:  # noqa: C901
             logger.info(f"[FS] Saving labels for image {task['image_id']}")
             repo.save_labels(task["image_id"], payload, st.session_state.username)
             update_cache_with_saved_data(task["image_id"], payload)
+            # Mark as labeled for downstream logic
+            task["status"] = "labeled"
+            st.session_state.current_task = task  # Update the session state with the new status
             st.success("Saved ✔︎")
+            st.rerun()
 
     # Refresh from Firestore
     with refresh_col:
