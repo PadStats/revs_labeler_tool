@@ -269,6 +269,7 @@ FEATURE_TAXONOMY: dict[str, dict[str, list[str]]] = {
             "Carpet",
             "Luxury Vinyl / Laminate",
             "Tile",
+
         ],
         "Fireplace": [
             "Wood‑Burning",
@@ -297,6 +298,13 @@ FEATURE_TAXONOMY: dict[str, dict[str, list[str]]] = {
             "Recessed / Can",
             "Ceiling Fan / Light",
         ],
+        "Wall Finish": [],
+        "Window Treatments": [],
+        "Doors": [],
+        "Built-Ins": [],
+        "HVAC Vents": [],
+        "Electrical Outlets": [],
+        "Smart-Home Features": [],
     },
 
     "Dining Room": {
