@@ -808,7 +808,6 @@ def build_location_features(location: str):
                 selected_features = st.multiselect(
                     "Features",  # internal label for accessibility
                     feats,
-                    default=current_selections,
                     key=sel_key,
                     label_visibility="collapsed",
                 )
