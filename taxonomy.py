@@ -255,6 +255,7 @@ FEATURE_TAXONOMY: dict[str, dict[str, list[str]]] = {
         ],
         "Wall Finish": [],
         "Ceiling": [],
+        "Windows": [],
         "Window Treatments": [],
         "Doors": [],
         "Built-Ins": [],
