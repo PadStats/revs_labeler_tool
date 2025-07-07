@@ -415,8 +415,18 @@ def main() -> None:  # noqa: C901
                     if (loc, category) in feature_by_location_category:
                         # Features were found for this category
                         features = feature_by_location_category[(loc, category)]
+                        
+                        # --- NEW: canonicalise loaded feature names to match taxonomy options (case-insensitive) ---
+                        canon_options = ui.FEATURE_TAXONOMY[loc][category]
+                        canon_features = []
+                        for feat in features:
+                            # Find first option whose lower-case matches
+                            matched = next((opt for opt in canon_options if opt.lower() == feat.lower()), None)
+                            canon_features.append(matched if matched is not None else feat)
+                        # -------------------------------------------------------------------------------
+                        
                         st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = False
-                        st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = features
+                        st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = canon_features
                     else:
                         # No features found - this category was marked as N/A
                         st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = True
