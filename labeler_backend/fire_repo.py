@@ -33,9 +33,10 @@ class FirestoreRepo(LabelRepo):
     def get_next_task(self, user_id: str) -> Optional[Dict]:
         """Return existing in-progress doc for *user_id*, or lock a new one.
 
-        Enhancement: if the user has images flagged for review (qa_status=='review')
-        those are prioritised *before* any normal task selection.  Confirmed images
-        (qa_status=='confirmed') are never surfaced to labelers.
+        Logic: 1) tasks sent back for revision (qa_status == 'review') get top
+        priority; 2) resume any in-progress task already locked by the user;
+        3) otherwise pick the oldest unlabeled image.  Confirmed images are no
+        longer filtered out, so they may surface like any other unlabeled task.
         """
 
         @firestore.transactional
@@ -73,10 +74,10 @@ class FirestoreRepo(LabelRepo):
             if docs:
                 return docs[0].to_dict()
 
-            # 2) acquire new (exclude confirmed) -----------------------------
+            # 2) acquire new ---------------------------------------------------
+            # Pick the oldest *unlabeled* image regardless of its qa_status.
             new_q = (
                 self.images.where("status", "==", "unlabeled")
-                .where("qa_status", "==", "pending")  # confirmed images are not pending
                 .order_by("timestamp_uploaded")
                 .limit(1)
             )

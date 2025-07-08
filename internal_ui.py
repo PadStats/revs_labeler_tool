@@ -799,7 +799,7 @@ def build_location_features(location: str):
             na_checked = st.checkbox(
                 "N/A",
                 key=na_key,
-                value=current_na,
+                #value=current_na,
             )
 
         with col_sel:

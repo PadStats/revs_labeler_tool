@@ -460,20 +460,45 @@ def main() -> None:  # noqa: C901
                     if (loc, category) in feature_by_location_category:
                         # Features were found for this category
                         features = feature_by_location_category[(loc, category)]
-                        
-                        # --- NEW: canonicalise loaded feature names to match taxonomy options (case-insensitive) ---
+
+                        # Canonicalise loaded feature names to match taxonomy options (case-insensitive)
                         canon_options = ui.FEATURE_TAXONOMY[loc][category]
-                        canon_features = []
-                        for feat in features:
-                            # Find first option whose lower-case matches
-                            matched = next((opt for opt in canon_options if opt.lower() == feat.lower()), None)
-                            canon_features.append(matched if matched is not None else feat)
-                        # -------------------------------------------------------------------------------
-                        
-                        st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = False
-                        st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = canon_features
+
+                        # --- Fallback logic ---------------------------------------------------------
+                        # If the taxonomy has **no** defined options *or* none of the loaded
+                        # features map onto an existing option, we treat the category as N/A.
+                        # This handles legacy labels like "standard" that were removed from the
+                        # taxonomy – previously these would render as an empty selection causing
+                        # the category to look incomplete in the UI.
+                        # ---------------------------------------------------------------------------
+                        if not canon_options:
+                            # No options defined – default to N/A
+                            st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = True
+                            st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = []
+                        else:
+                            canon_features: list[str] = []
+                            for feat in features:
+                                # Trim whitespace & normalise dashes/underscores for robust matching
+                                feat_clean = feat.strip().lower().replace("-", " ").replace("_", " ")
+                                matched = next(
+                                    (
+                                        opt
+                                        for opt in canon_options
+                                        if opt.lower().replace("-", " ").replace("_", " ") == feat_clean
+                                    ),
+                                    None,
+                                )
+                                if matched:
+                                    canon_features.append(matched)
+                            # After canonicalisation, if we didn't retain any valid features, mark as N/A
+                            if not canon_features:
+                                st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = True
+                                st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = []
+                            else:
+                                st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = False
+                                st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = canon_features
                     else:
-                        # No features found - this category was marked as N/A
+                        # No features found – this category was marked as N/A
                         st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = True
                         st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = []
 
@@ -1359,8 +1384,15 @@ def main() -> None:  # noqa: C901
                 # ------------------------------------------------------------------
                 next_task: dict | None = None
 
-                if task.get("status") == "labeled":
-                    # ---- Case A: we're on a labeled image – get the *next* labeled image ----
+                # Only navigate through labeled history if this is a "done" image
+                # (not a review image that was just saved)
+                is_done_labeled_image = (
+                    task.get("status") == "labeled" and 
+                    task.get("qa_status") in ["pending", "confirmed"]
+                )
+
+                if is_done_labeled_image:
+                    # ---- Case A: we're on a done labeled image – get the *next* labeled image ----
                     try:
                         hist = repo.get_user_history(st.session_state.username, limit=200)
                         logger.info(f"[NAV] Retrieved {len(hist)} labeled images for next navigation")
@@ -1398,29 +1430,12 @@ def main() -> None:  # noqa: C901
                         else:
                             logger.info(f"[NAV] Current image not found in history or is newest")
 
-                # ---- Case B: no further labeled images – fall back to in-progress queue ----
+                # ---- Case B: fall back to task priority system (review → in-progress → new) ----
                 if next_task is None:
-                    logger.info(f"[NAV] No next labeled image, checking in-progress queue")
-                    # Use any preloaded history_stack first (these are usually in-progress)
-                    hist_stack: list = st.session_state.get("history_stack", [])
-                    logger.info(f"[NAV] History stack has {len(hist_stack)} items")
-                    
-                    # Remove any labeled entries from the stack
-                    while hist_stack and hist_stack[0].get("status") == "labeled":
-                        removed = hist_stack.pop(0)
-                        logger.info(f"[NAV] Removed labeled entry from stack: {removed.get('image_id')}")
-                    
-                    if hist_stack:
-                        next_task = hist_stack.pop(0)
-                        st.session_state.history_stack = hist_stack
-                        logger.info(f"[NAV] Got in-progress task from stack: {next_task.get('image_id')}")
-
-                # ---- Case C: still nothing – ask repo for a brand-new task ----
-                if next_task is None:
-                    logger.info(f"[NAV] No in-progress tasks, getting new task from repo")
+                    logger.info(f"[NAV] No next labeled image or not browsing history, getting next task from repo")
                     next_task = repo.get_next_task(st.session_state.username)
                     if next_task:
-                        logger.info(f"[NAV] Got new task from repo: {next_task.get('image_id')}")
+                        logger.info(f"[NAV] Got task from repo: {next_task.get('image_id')} (qa_status: {next_task.get('qa_status')}, status: {next_task.get('status')})")
                     else:
                         logger.info(f"[NAV] No new tasks available")
 
@@ -1688,6 +1703,8 @@ def main() -> None:  # noqa: C901
                 update_cache_with_saved_data(task["image_id"], payload)
                 # Mark as labeled for downstream logic
                 task["status"] = "labeled"
+                # Also update qa_status to match what happens in the backend
+                task["qa_status"] = "pending"
                 st.session_state.current_task = task  # Update the session state with the new status
                 st.success("Saved ✔︎")
                 st.rerun()

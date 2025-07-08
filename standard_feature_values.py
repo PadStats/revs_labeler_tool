@@ -221,12 +221,13 @@ STANDARD_FEATURE_VALUES = {
         "black stainless",
         "other",
     ],
-    "smart_home_features": [
+    "misc": [
         "smart thermostat",
         "smart lighting",
         "smart lock",
         "video doorbell",
         "security camera",
+        "smoke alarm",
         "none",
         "other",
     ],
