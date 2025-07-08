@@ -91,8 +91,21 @@ def main() -> None:
             for rev in doc.reference.collection("revisions").list_documents():
                 batch.delete(rev)
             batch.delete(doc.reference)
-            # Reset image status if the image exists
-            batch.update(images.document(doc.id), {"status": "unlabeled", "flagged": False})
+            # Reset image status & QA fields if the image exists
+            batch.update(
+                images.document(doc.id),
+                {
+                    "status": "unlabeled",
+                    "flagged": False,
+                    "qa_status": "pending",
+                    "qa_feedback": firestore.DELETE_FIELD,
+                    "assigned_to": None,
+                    "review_requested_by": firestore.DELETE_FIELD,
+                    "timestamp_review_requested": firestore.DELETE_FIELD,
+                    "confirmed_by": firestore.DELETE_FIELD,
+                    "timestamp_confirmed": firestore.DELETE_FIELD,
+                },
+            )
         
         batch.commit()
         print("✓ Labels wiped successfully")
@@ -118,8 +131,21 @@ def main() -> None:
         for rev in label_ref.collection("revisions").list_documents():
             batch.delete(rev)
         batch.delete(label_ref)
-        # reset image status if exists
-        batch.update(images.document(img_id), {"status": "unlabeled", "flagged": False})
+        # reset image status & QA fields if exists
+        batch.update(
+            images.document(img_id),
+            {
+                "status": "unlabeled",
+                "flagged": False,
+                "qa_status": "pending",
+                "qa_feedback": firestore.DELETE_FIELD,
+                "assigned_to": None,
+                "review_requested_by": firestore.DELETE_FIELD,
+                "timestamp_review_requested": firestore.DELETE_FIELD,
+                "confirmed_by": firestore.DELETE_FIELD,
+                "timestamp_confirmed": firestore.DELETE_FIELD,
+            },
+        )
     batch.commit()
     print("✓ wipe complete")
 

@@ -1,3 +1,5 @@
+# 14" screen
+
 #!/usr/bin/env python
 """Unlock tasks stuck in `in_progress` state.
 
@@ -101,7 +103,20 @@ def main() -> None:
     batch = db.batch()
     for d in docs:
         ref = d.reference
-        batch.update(ref, {"status": "unlabeled", "assigned_to": None, "task_expires_at": None})
+        batch.update(
+            ref,
+            {
+                "status": "unlabeled",
+                "assigned_to": None,
+                "task_expires_at": None,
+                "qa_status": "pending",
+                "qa_feedback": firestore.DELETE_FIELD,
+                "review_requested_by": firestore.DELETE_FIELD,
+                "timestamp_review_requested": firestore.DELETE_FIELD,
+                "confirmed_by": firestore.DELETE_FIELD,
+                "timestamp_confirmed": firestore.DELETE_FIELD,
+            },
+        )
     batch.commit()
     print(f"\n✓ Unlocked {len(docs)} task(s).")
 

@@ -261,6 +261,33 @@ def main() -> None:  # noqa: C901
     # Determine current user's role
     is_admin = st.session_state.get("role") == "admin"
 
+    # ------------------------------------------------------------------
+    # Admin controls (sidebar) – allow switching between Label & Review
+    # ------------------------------------------------------------------
+    admin_mode: str = st.session_state.get("admin_mode", "Label")
+    review_target_user: str = st.session_state.get("review_target_user", "")
+    if is_admin:
+        with st.sidebar:
+            st.markdown("### Admin Controls")
+            admin_mode = st.radio("Mode", ["Label", "Review"], key="admin_mode")
+            if admin_mode == "Review":
+                review_target_user = st.text_input("Labeler username", key="review_target_user")
+    else:
+        # force defaults for non-admins
+        admin_mode, review_target_user = "Label", ""
+
+    is_admin_review = is_admin and admin_mode == "Review" and bool(review_target_user)
+
+    # Handle mode switch: if admin switches from Review to Label, reset state and load labeler image
+    if is_admin and admin_mode == "Label" and st.session_state.get("_last_review_user"):
+        st.session_state._last_review_user = None
+        st.session_state.current_task = None
+        # Reset all session state relevant to labeling UI
+        for key in list(st.session_state.keys()):
+            if key not in ("role", "username", "authenticated", "repo", "repo_mode", "admin_mode"):
+                del st.session_state[key]
+        st.rerun()
+
     # ---------------------------------------------------------------
     # Cache the LabelRepo so we do NOT rebuild a Firestore client on
     # every Streamlit rerun (which causes perceptible UI lag).
@@ -295,40 +322,58 @@ def main() -> None:  # noqa: C901
     logger.info(f"[DEBUG] Task at start: {task.get('image_id') if task else 'None'} (status: {task.get('status') if task else 'N/A'})")
     if task is None:
         logger.info(f"[DEBUG] No current task, loading new task")
-        # first check if we already have a pre-loaded history stack
-        hist_stack: list = st.session_state.get("history_stack", [])  # type: ignore[var-annotated]
-        if hist_stack:
-            task = hist_stack.pop(0)
-            st.session_state.history_stack = hist_stack
-            st.session_state.current_task = task
-            logger.info(f"[DEBUG] Loaded task from history stack: {task.get('image_id')} (status: {task.get('status')})")
-            # Add to navigation history when loading from history stack
-            if task.get("image_id") and task.get("image_id") not in st.session_state.navigation_history:
-                st.session_state.navigation_history.append(task.get("image_id"))
-        else:
-            logger.info(f"[DEBUG] No history stack, getting next task from repo")
-            task = repo.get_next_task(st.session_state.username)
-            if task is None:
-                logger.info(f"[DEBUG] No next task available, falling back to labeled history")
-                # nothing in progress – fall back to labeled history
-                history = repo.get_user_history(st.session_state.username, limit=HISTORY_LIMIT)
-                if history:
-                    st.session_state.history_stack = history[1:]
-                    task = history[0]
-                    st.session_state.current_task = task
-                    logger.info(f"[DEBUG] Loaded task from user history: {task.get('image_id')} (status: {task.get('status')})")
-                    # Add to navigation history when loading from user history
-                    if task.get("image_id") and task.get("image_id") not in st.session_state.navigation_history:
-                        st.session_state.navigation_history.append(task.get("image_id"))
-                else:
-                    logger.info(f"[DEBUG] No user history available")
-                    st.success("🎉 No more images to label.")
+
+        # --- Admin review path -------------------------------------------------
+        if is_admin_review:
+            # If the username changed or no current task, load the first pending image
+            if (
+                st.session_state.get("_last_review_user") != review_target_user
+                or st.session_state.current_task is None
+            ):
+                task = repo.get_next_review_task(review_target_user)
+                st.session_state.current_task = task
+                st.session_state._last_review_user = review_target_user
+                if task is None:
+                    st.success(f"🎉 No more images to review for {review_target_user}.")
                     return
             else:
-                logger.info(f"[DEBUG] Got new task from repo: {task.get('image_id')} (status: {task.get('status')})")
-                # Add to navigation history when loading new task
+                task = st.session_state.current_task
+        # --- Normal labeler path ---------------------------------------------
+        else:
+            # first check if we already have a pre-loaded history stack
+            hist_stack: list = st.session_state.get("history_stack", [])  # type: ignore[var-annotated]
+            if hist_stack:
+                task = hist_stack.pop(0)
+                st.session_state.history_stack = hist_stack
+                st.session_state.current_task = task
+                logger.info(f"[DEBUG] Loaded task from history stack: {task.get('image_id')} (status: {task.get('status')})")
+                # Add to navigation history when loading from history stack
                 if task.get("image_id") and task.get("image_id") not in st.session_state.navigation_history:
                     st.session_state.navigation_history.append(task.get("image_id"))
+            else:
+                logger.info(f"[DEBUG] No history stack, getting next task from repo")
+                task = repo.get_next_task(st.session_state.username)
+                if task is None:
+                    logger.info(f"[DEBUG] No next task available, falling back to labeled history")
+                    # nothing in progress – fall back to labeled history
+                    history = repo.get_user_history(st.session_state.username, limit=HISTORY_LIMIT)
+                    if history:
+                        st.session_state.history_stack = history[1:]
+                        task = history[0]
+                        st.session_state.current_task = task
+                        logger.info(f"[DEBUG] Loaded task from user history: {task.get('image_id')} (status: {task.get('status')})")
+                        # Add to navigation history when loading from user history
+                        if task.get("image_id") and task.get("image_id") not in st.session_state.navigation_history:
+                            st.session_state.navigation_history.append(task.get("image_id"))
+                    else:
+                        logger.info(f"[DEBUG] No user history available")
+                        st.success("🎉 No more images to label.")
+                        return
+                else:
+                    logger.info(f"[DEBUG] Got new task from repo: {task.get('image_id')} (status: {task.get('status')})")
+                    # Add to navigation history when loading new task
+                    if task.get("image_id") and task.get("image_id") not in st.session_state.navigation_history:
+                        st.session_state.navigation_history.append(task.get("image_id"))
 
     # ---- Load task data and rebuild session state with caching ----
     logger.info(f"[DEBUG] Task loading condition: task={task.get('image_id') if task else 'None'}, _last_loaded_id={st.session_state.get('_last_loaded_id')}")
@@ -833,6 +878,9 @@ def main() -> None:  # noqa: C901
         spacer_px = 600
     _inject_dynamic_spacer(spacer_px)
 
+    # QA feedback banners will be shown in labeler mode only, positioned after navigation buttons
+    confirmed_readonly = False
+
     # ------------------------------------------------------------------
     # Restore feature state EARLY - before UI
     # ------------------------------------------------------------------
@@ -861,480 +909,701 @@ def main() -> None:  # noqa: C901
     # Restore condition state EARLY as well (from legacy)
     ui.restore_condition_state()
 
-    # Navigation buttons (moved above current selections - from legacy)
-    nav_left, nav_prev, nav_next, nav_right = st.columns([3, 1, 1, 3], gap="small")
+    # ------------------------------------------------------------------
+    # Admin review action buttons (Confirm / Needs changes)
+    # ------------------------------------------------------------------
+    if is_admin_review:
+        # Navigation buttons for admin review
+        nav_left, nav_prev, nav_next, nav_right = st.columns([3, 1, 1, 3], gap="small")
 
-    # Check validation status AFTER state restoration
-    can_proceed = ui.can_move_on()
-
-    with nav_prev:
-        # Debug logging for navigation state
-        current_image_id = task.get("image_id") if task else None
-        current_status = task.get("status") if task else "N/A"
-        logger.info(f"[NAV] Previous button check - Current: {current_image_id} (status: {current_status})")
-        
-        # Initialize navigation history if not exists
-        if "navigation_history" not in st.session_state:
-            st.session_state.navigation_history = []
-        
-        # Add current image to navigation history if not already there
-        if current_image_id and current_image_id not in st.session_state.navigation_history:
-            st.session_state.navigation_history.append(current_image_id)
-            logger.info(f"[NAV] Added to history: {current_image_id}")
-
-        # Check if we have more history to go back to
-        has_remote_prev = False
-        prev_entry = None
-        
+        # Check if navigation is available (similar to labeler mode)
+        has_prev = False
+        has_next = False
         try:
-            # Get full user history (not limited by HISTORY_LIMIT)
-            prev_hist = repo.get_user_history(st.session_state.username, limit=200)
-            logger.info(f"[NAV] Retrieved {len(prev_hist)} labeled images from history")
+            # Check if previous image is available
+            prev_check = repo.get_prev_review_task(review_target_user, before_image_id=task["image_id"])
+            has_prev = prev_check is not None
             
-            if prev_hist:
-                # History is ordered DESCENDING (newest first)
-                # So index 0 = newest, index 1 = second newest, etc.
-                
-                if current_status == "labeled":
-                    # We're on a labeled image - find the next labeled image (older timestamp)
-                    current_idx = None
-                    for idx, entry in enumerate(prev_hist):
-                        if entry.get("image_id") == current_image_id:
-                            current_idx = idx
-                            break
-                    
-                    if current_idx is not None and current_idx + 1 < len(prev_hist):
-                        # Found current image in history, get the next one (older)
-                        prev_entry = prev_hist[current_idx + 1]
-                        has_remote_prev = True
-                        logger.info(f"[NAV] Found previous labeled image: {prev_entry.get('image_id')} (idx: {current_idx + 1})")
-                    else:
-                        logger.info(f"[NAV] Current labeled image not found in history or is oldest")
-                else:
-                    # We're on an in-progress/new image - get the most recent labeled image
-                    prev_entry = prev_hist[0]  # Newest labeled image
-                    has_remote_prev = True
-                    logger.info(f"[NAV] On in-progress image, getting most recent labeled: {prev_entry.get('image_id')}")
-            else:
-                logger.info(f"[NAV] No labeled images in history")
-                
+            # Check if next image is available  
+            next_check = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])
+            has_next = next_check is not None
         except Exception as e:
-            logger.error(f"[NAV] Error getting user history: {e}")
-            has_remote_prev = False
+            logger.error(f"[ADMIN NAV] Error checking navigation availability: {e}")
+            has_prev = False
+            has_next = False
 
-        disabled = not has_remote_prev
-        logger.info(f"[NAV] Previous button disabled: {disabled}")
-
-        if st.button("⬅️ Previous",
-                     use_container_width=True,
-                     disabled=disabled,
-                     key="btn_prev"):
-            logger.info(f"[NAV] Previous button clicked")
-            clear_cache()
-
-            if prev_entry:
-                image_id = prev_entry.get("image_id")
-                logger.info(f"[NAV] Loading previous image: {image_id}")
-                
-                if image_id:
-                    try:
-                        img_doc = repo.get_image_doc(image_id)
-                    except AttributeError:
-                        img_doc = None
-
-                    if not img_doc:
-                        img_doc = {
-                            "image_id": image_id,
-                            "status": "labeled",
-                            "bb_url": prev_entry.get("bb_url", ""),
-                        }
-
-                    # Merge history data with image doc
-                    merged_task = {**prev_entry, **img_doc}
-                    st.session_state.current_task = merged_task
-                    logger.info(f"[NAV] Set current_task to: {image_id} (status: {merged_task.get('status')})")
-                    
-                    # Clear _last_loaded_id to force reload
-                    st.session_state._last_loaded_id = None
+        with nav_prev:
+            if st.button("⬅️ Previous", use_container_width=True, disabled=not has_prev, key="admin_btn_prev"):
+                prev_task = repo.get_prev_review_task(review_target_user, before_image_id=task["image_id"])
+                if prev_task:
+                    st.session_state.current_task = prev_task
                     st.rerun()
 
-    with nav_next:
-        is_labeled_now = task.get("status") == "labeled"
-        logger.info(f"[NAV] Next button check - Current: {current_image_id} (status: {current_status}), enabled: {is_labeled_now}")
-        
-        if st.button("➡️ Next",
-                     use_container_width=True,
-                     disabled=not is_labeled_now,
-                     key="btn_next"):
-            logger.info(f"[NAV] Next button clicked")
-            
-            # ------------------------------------------------------------------
-            # Next navigation logic
-            # ------------------------------------------------------------------
-            next_task: dict | None = None
-
-            if task.get("status") == "labeled":
-                # ---- Case A: we're on a labeled image – get the *next* labeled image ----
-                try:
-                    hist = repo.get_user_history(st.session_state.username, limit=200)
-                    logger.info(f"[NAV] Retrieved {len(hist)} labeled images for next navigation")
-                except Exception as e:
-                    logger.error(f"[NAV] Error getting history for next: {e}")
-                    hist = []
-
-                if hist:
-                    # History is ordered DESCENDING (newest first)
-                    # So to get "next" (newer), we need to go to a lower index
-                    current_idx = None
-                    for idx, entry in enumerate(hist):
-                        if entry.get("image_id") == task["image_id"]:
-                            current_idx = idx
-                            break
-                    
-                    if current_idx is not None and current_idx > 0:
-                        # Found current image, get the previous one (newer timestamp)
-                        next_entry = hist[current_idx - 1]
-                        image_id = next_entry.get("image_id")
-                        logger.info(f"[NAV] Found next labeled image: {image_id} (idx: {current_idx - 1})")
-                        
-                        if image_id:
-                            try:
-                                doc = repo.get_image_doc(image_id)
-                            except AttributeError:
-                                doc = None
-                            if not doc:
-                                doc = {
-                                    "image_id": image_id,
-                                    "status": "labeled",
-                                    "bb_url": next_entry.get("bb_url", ""),
-                                }
-                            next_task = {**next_entry, **doc}
-                    else:
-                        logger.info(f"[NAV] Current image not found in history or is newest")
-
-            # ---- Case B: no further labeled images – fall back to in-progress queue ----
-            if next_task is None:
-                logger.info(f"[NAV] No next labeled image, checking in-progress queue")
-                # Use any preloaded history_stack first (these are usually in-progress)
-                hist_stack: list = st.session_state.get("history_stack", [])
-                logger.info(f"[NAV] History stack has {len(hist_stack)} items")
-                
-                # Remove any labeled entries from the stack
-                while hist_stack and hist_stack[0].get("status") == "labeled":
-                    removed = hist_stack.pop(0)
-                    logger.info(f"[NAV] Removed labeled entry from stack: {removed.get('image_id')}")
-                
-                if hist_stack:
-                    next_task = hist_stack.pop(0)
-                    st.session_state.history_stack = hist_stack
-                    logger.info(f"[NAV] Got in-progress task from stack: {next_task.get('image_id')}")
-
-            # ---- Case C: still nothing – ask repo for a brand-new task ----
-            if next_task is None:
-                logger.info(f"[NAV] No in-progress tasks, getting new task from repo")
-                next_task = repo.get_next_task(st.session_state.username)
+        with nav_next:
+            if st.button("➡️ Next", use_container_width=True, disabled=not has_next, key="admin_btn_next"):
+                next_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])
                 if next_task:
-                    logger.info(f"[NAV] Got new task from repo: {next_task.get('image_id')}")
-                else:
-                    logger.info(f"[NAV] No new tasks available")
+                    st.session_state.current_task = next_task
+                    st.rerun()
 
-            # ------------------------------------------------------------------
-            # Update session & cache, no Firestore writes here
-            # ------------------------------------------------------------------
-            if next_task:
-                clear_cache()
-                st.session_state.current_task = next_task
-                st.session_state._last_loaded_id = None  # Force reload
-                logger.info(f"[NAV] Set current_task to: {next_task.get('image_id')} (status: {next_task.get('status')})")
+        # QA feedback and action buttons
+        st.markdown("---")
+        # Pre-populate feedback box with existing feedback (if any)
+        existing_feedback = task.get("qa_feedback", "")
+        fb_input = st.text_area("Optional feedback for labeler", value=existing_feedback, key="qa_feedback_input")
+        col_c, col_r = st.columns([1, 1], gap="small")
+        with col_c:
+            if st.button("✅ Confirm", type="primary", use_container_width=True):
+                repo.confirm_labels(task["image_id"], st.session_state.username)
+                st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])
                 st.rerun()
+        with col_r:
+            if st.button("↩️ Needs changes", use_container_width=True):
+                repo.request_revision(task["image_id"], review_target_user, st.session_state.username, fb_input)
+                st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])
+                st.rerun()
+
+        # Admin review: show current selections with improved layout
+        st.markdown("---")
+        
+        # Create a nice header
+        st.markdown("## 📋 Current Labels (Read-Only)")
+        
+        complete = ui.get_complete_chains()
+
+        # Get features from current session state
+        feats_by_loc = {}
+        for loc in sorted(leaves):
+            feats = []
+            if loc in ui.FEATURE_TAXONOMY:
+                for category in ui.FEATURE_TAXONOMY[loc]:
+                    sel_key = f"sel_{loc}_{category}"
+                    na_key = f"na_{loc}_{category}"
+                    
+                    # Get current state
+                    selections = st.session_state.get(sel_key, [])
+                    is_na = st.session_state.get(na_key, False)
+                    
+                    # If N/A is checked, don't show any features for this category
+                    if not is_na:
+                        # Add category context to features for better display
+                        for feature in selections:
+                            if feature == "None":
+                                feats.append(f"{category}: None")
+                            else:
+                                feats.append(f"{category}: {feature}")
+            feats_by_loc[loc] = feats
+
+        # Improved 4-column layout: Locations | Features | Attributes | Condition Scores
+        loc_col, feat_col, attr_col, cond_col = st.columns([1, 1, 1, 1], gap="medium")
+
+        # ---- Locations ----
+        with loc_col:
+            st.markdown("### 🏠 Locations")
+            if complete:
+                for chain in complete:
+                    st.markdown(f"**•** {' → '.join(chain)}")
             else:
-                logger.info(f"[NAV] No next task available")
-                st.warning("No more images available")
+                st.markdown("*No locations selected*")
 
-    # Current Selections Display (from legacy)
-    sel_left, sel_mid, sel_right = st.columns([1, 4, 1], gap="small")
-    complete = ui.get_complete_chains()
+        # ---- Features ----
+        with feat_col:
+            st.markdown("### 🔧 Features")
+            
+            groups = list(feats_by_loc.items())
+            feature_hash = "|".join(
+                f"{loc}:{','.join(sorted(feats))}" for loc, feats in sorted(feats_by_loc.items()) if feats
+            )
 
-    # Get features from current session state (after restoration)
-    feats_by_loc = {}
-    for loc in sorted(leaves):
-        feats = []
-        if loc in ui.FEATURE_TAXONOMY:
-            for category in ui.FEATURE_TAXONOMY[loc]:
-                sel_key = f"sel_{loc}_{category}"
-                na_key = f"na_{loc}_{category}"
+            if not feature_hash:
+                st.markdown("*No features selected*")
+            else:
+                # Create a nice table using Streamlit's built-in dataframe display
+                import pandas as pd
                 
-                # Get current state
-                selections = st.session_state.get(sel_key, [])
-                is_na = st.session_state.get(na_key, False)
+                # Collect all features with their locations for table format
+                table_data = []
+                for loc, feats in groups:
+                    if feats:
+                        for feat in feats:
+                            # Extract category and feature name from "Category: Feature" format
+                            if ": " in feat:
+                                category, feature_name = feat.split(": ", 1)
+                                table_data.append({
+                                    "Location": loc,
+                                    "Category": category,
+                                    "Feature": feature_name
+                                })
+                            else:
+                                # Fallback for features without category prefix
+                                table_data.append({
+                                    "Location": loc,
+                                    "Category": "General",
+                                    "Feature": feat
+                                })
                 
-                # If N/A is checked, don't show any features for this category
-                if not is_na:
-                    # Add category context to features for better display
-                    for feature in selections:
-                        if feature == "None":
-                            feats.append(f"{category}: None")
-                        else:
-                            feats.append(f"{category}: {feature}")
-        feats_by_loc[loc] = feats
+                if table_data:
+                    df = pd.DataFrame(table_data)
+                    st.dataframe(
+                        df,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Location": st.column_config.TextColumn("Location", width="small"),
+                            "Category": st.column_config.TextColumn("Category", width="medium"),
+                            "Feature": st.column_config.TextColumn("Feature", width="medium")
+                        }
+                    )
 
-    groups = list(feats_by_loc.items())
+        # ---- Attributes ----
+        with attr_col:
+            st.markdown("### 📊 Attributes")
 
-    with sel_mid:
-        with st.expander("📋 Current Selections", expanded=True):
-            # ------------------------------------------------------------------
-            # 3-column grid: Locations | Features | Attributes
-            # ------------------------------------------------------------------
-            loc_col, feat_col, attr_col = st.columns([1, 1, 1], gap="medium")
+            if not st.session_state.location_attributes:
+                st.markdown("*No attributes set*")
+            else:
+                # Better formatted attribute display
+                displayed_any = False
+                for location_key, attrs in st.session_state.location_attributes.items():
+                    if not attrs:
+                        continue
+                    loc_parts = location_key.split('_', 2)
+                    if len(loc_parts) < 3:
+                        continue
+                    location_name = loc_parts[2]
 
-            # ---- Locations ----
-            with loc_col:
-                st.subheader("Locations")
-                if complete:
-                    for chain in complete:
-                        st.write("• " + " → ".join(chain))
-                else:
-                    st.write("_(none selected)_")
-
-            # ---- Features ----
-            with feat_col:
-                st.subheader("Features")
+                    for attr, value in attrs.items():
+                        if value:
+                            attr_display = attr.replace("_", " ").title()
+                            st.markdown(f"**{location_name}** - {attr_display}: **{value}**")
+                            displayed_any = True
                 
-                # Hash current selections for change detection
-                feature_hash = "|".join(
-                    f"{loc}:{','.join(sorted(feats))}" for loc, feats in sorted(feats_by_loc.items()) if feats
-                )
+                if not displayed_any:
+                    st.markdown("*No attributes set*")
 
-                if not feature_hash:
-                    st.write("_(no features yet)_")
-                else:
-                    # Rebuild table only if selections changed
-                    if cache_entry.get('feature_table_hash') != feature_hash:
-                        logger.info("[PERF] feature table rebuilt")
-                        headers = "".join(
-                            f"<th style='text-align:left; padding:4px'>{loc}</th>"
-                            for loc, feats in groups if feats
-                        )
-                        filtered_groups = [(loc, feats) for loc, feats in groups if feats]
-                        max_rows = max(len(feats) for _, feats in filtered_groups)
-                        rows_html = ""
-                        for i in range(max_rows):
-                            row_cells = ""
-                            for _, feats in filtered_groups:
-                                if i < len(feats):
-                                    row_cells += (
-                                        "<td style='text-align:left; padding:2px'>"
-                                        f"• {feats[i]}"
-                                        "</td>"
-                                    )
-                                else:
-                                    row_cells += "<td></td>"
-                            rows_html += f"<tr>{row_cells}</tr>"
-
-                        table_html = (
-                            "<table style='width:100%; border-collapse: collapse;'>"
-                            f"<tr>{headers}</tr>"
-                            f"{rows_html}"
-                            "</table>"
-                        )
-
-                        cache_entry['feature_table_html'] = table_html
-                        cache_entry['feature_table_hash'] = feature_hash
-                    else:
-                        table_html = cache_entry['feature_table_html']
-
-                    st.markdown(table_html, unsafe_allow_html=True)
-
-            # ---- Attributes ----
-            with attr_col:
-                st.subheader("Attributes")
-
-                # Build hash for attribute selections
-                attr_hash = hash(str(st.session_state.location_attributes))
-
-                if not st.session_state.location_attributes:
-                    st.write("_(no attributes yet)_")
-                else:
-                    if cache_entry.get('attr_table_hash') != attr_hash:
-                        logger.info("[PERF] attribute table rebuilt")
-                        attr_table_html = "<table style='width:100%; border-collapse: collapse;'>"
-                        attr_table_html += "<tr><th style='text-align:left; padding:4px'>Location</th><th style='text-align:left; padding:4px'>Attribute</th><th style='text-align:left; padding:4px'>Value</th></tr>"
-
-                        for location_key, attrs in st.session_state.location_attributes.items():
-                            if not attrs:
-                                continue
-                            loc_parts = location_key.split('_', 2)
-                            if len(loc_parts) < 3:
-                                continue
-                            location_name = loc_parts[2]
-
-                            for attr, value in attrs.items():
-                                if value:
-                                    attr_display = attr.replace("_", " ").title()
-                                    attr_table_html += (
-                                        f"<tr><td style='text-align:left; padding:2px'>{location_name}</td>"
-                                        f"<td style='text-align:left; padding:2px'>{attr_display}</td>"
-                                        f"<td style='text-align:left; padding:2px'>{value}</td></tr>"
-                                    )
-
-                        attr_table_html += "</table>"
-
-                        cache_entry['attr_table_html'] = attr_table_html
-                        cache_entry['attr_table_hash'] = attr_hash
-                    st.markdown(cache_entry['attr_table_html'], unsafe_allow_html=True)
-
-            # ---------------- Condition Scores ------------------
-            st.subheader("Condition Scores")
+        # ---- Condition Scores ----
+        with cond_col:
+            st.markdown("### 🏗️ Condition Scores")
 
             cond = st.session_state.condition_scores  # type: ignore[attr-defined]
+            prop_score = st.session_state.condition_scores['property_condition']
+            
+            if st.session_state.get("property_condition_na", False):
+                st.markdown("**Property Condition:** N/A")
+            else:
+                score_interpretation = {
+                    **{k: "Excellent" for k in [round(x/10,1) for x in range(10,20)]},
+                    **{k: "Good" for k in [round(x/10,1) for x in range(20,30)]},
+                    **{k: "Average" for k in [round(x/10,1) for x in range(30,40)]},
+                    **{k: "Fair" for k in [round(x/10,1) for x in range(40,50)]},
+                    5.0: "Poor",
+                }
+                closest = min(score_interpretation, key=lambda x: abs(x - prop_score))
+                interp = score_interpretation[closest]
+                st.markdown(f"**Property Condition:** {prop_score:.3f} ({interp})")
 
-            # Build stable hash string so equality survives reruns
-            na_flag = bool(st.session_state.get("property_condition_na", False))
-            prop_score_val = round(cond["property_condition"], 3)
-            quality_val = cond["quality_of_construction"] or ""
-            improvement_val = cond["improvement_condition"] or ""
+            quality_display = st.session_state.condition_scores["quality_of_construction"] or "Not Selected"
+            st.markdown(f"**Quality of Construction:** {quality_display}")
 
-            cs_state = f"{na_flag}|{prop_score_val:.3f}|{quality_val}|{improvement_val}"
+            improvement_display = st.session_state.condition_scores["improvement_condition"] or "Not Selected"
+            st.markdown(f"**Improvement Condition:** {improvement_display}")
 
-            if cache_entry.get('cond_scores_hash') != cs_state:
-                logger.info("[PERF] condition table rebuilt")
-                scores_table_html = "<table style='width:100%; border-collapse: collapse;'>"
-                scores_table_html += "<tr><th style='text-align:left; padding:4px'>Category</th><th style='text-align:left; padding:4px'>Score/Selection</th></tr>"
+        # Notes section for admin review
+        st.markdown("---")
+        st.markdown("### 📝 Notes")
+        if st.session_state.notes.strip():
+            st.markdown(f"**Labeler Notes:** {st.session_state.notes}")
+        else:
+            st.markdown("*No notes provided*")
 
-                prop_score = st.session_state.condition_scores['property_condition']
-                if st.session_state.get("property_condition_na", False):
-                    scores_table_html += (
-                        "<tr><td style='text-align:left; padding:2px'>Property Condition</td>"
-                        "<td style='text-align:left; padding:2px'>N/A (N/A)</td></tr>"
-                    )
+    else:
+        # ------------------------------------------------------------------
+        # Main labeling UI (selectors, save/clear/flag, etc.)
+        # ------------------------------------------------------------------
+        
+        # Navigation buttons (moved above current selections - from legacy)
+        nav_left, nav_prev, nav_next, nav_right = st.columns([3, 1, 1, 3], gap="small")
+
+        # Check validation status AFTER state restoration
+        can_proceed = ui.can_move_on()
+
+        with nav_prev:
+            # Debug logging for navigation state
+            current_image_id = task.get("image_id") if task else None
+            current_status = task.get("status") if task else "N/A"
+            logger.info(f"[NAV] Previous button check - Current: {current_image_id} (status: {current_status})")
+            
+            # Initialize navigation history if not exists
+            if "navigation_history" not in st.session_state:
+                st.session_state.navigation_history = []
+            
+            # Add current image to navigation history if not already there
+            if current_image_id and current_image_id not in st.session_state.navigation_history:
+                st.session_state.navigation_history.append(current_image_id)
+                logger.info(f"[NAV] Added to history: {current_image_id}")
+
+            # Check if we have more history to go back to
+            has_remote_prev = False
+            prev_entry = None
+            
+            try:
+                # Get full user history (not limited by HISTORY_LIMIT)
+                prev_hist = repo.get_user_history(st.session_state.username, limit=200)
+                logger.info(f"[NAV] Retrieved {len(prev_hist)} labeled images from history")
+                
+                if prev_hist:
+                    # History is ordered DESCENDING (newest first)
+                    # So index 0 = newest, index 1 = second newest, etc.
+                    
+                    if current_status == "labeled":
+                        # We're on a labeled image - find the next labeled image (older timestamp)
+                        current_idx = None
+                        for idx, entry in enumerate(prev_hist):
+                            if entry.get("image_id") == current_image_id:
+                                current_idx = idx
+                                break
+                        
+                        if current_idx is not None and current_idx + 1 < len(prev_hist):
+                            # Found current image in history, get the next one (older)
+                            prev_entry = prev_hist[current_idx + 1]
+                            has_remote_prev = True
+                            logger.info(f"[NAV] Found previous labeled image: {prev_entry.get('image_id')} (idx: {current_idx + 1})")
+                        else:
+                            logger.info(f"[NAV] Current labeled image not found in history or is oldest")
+                    else:
+                        # We're on an in-progress/new image - get the most recent labeled image
+                        prev_entry = prev_hist[0]  # Newest labeled image
+                        has_remote_prev = True
+                        logger.info(f"[NAV] On in-progress image, getting most recent labeled: {prev_entry.get('image_id')}")
                 else:
-                    score_interpretation = {
-                        **{k: "Excellent" for k in [round(x/10,1) for x in range(10,20)]},
-                        **{k: "Good" for k in [round(x/10,1) for x in range(20,30)]},
-                        **{k: "Average" for k in [round(x/10,1) for x in range(30,40)]},
-                        **{k: "Fair" for k in [round(x/10,1) for x in range(40,50)]},
-                        5.0: "Poor",
-                    }
-                    closest = min(score_interpretation, key=lambda x: abs(x - prop_score))
-                    interp = score_interpretation[closest]
-                    scores_table_html += (
-                        f"<tr><td style='text-align:left; padding:2px'>Property Condition</td>"
-                        f"<td style='text-align:left; padding:2px'>{prop_score:.3f} ({interp})</td></tr>"
+                    logger.info(f"[NAV] No labeled images in history")
+                    
+            except Exception as e:
+                logger.error(f"[NAV] Error getting user history: {e}")
+                has_remote_prev = False
+
+            disabled = not has_remote_prev
+            logger.info(f"[NAV] Previous button disabled: {disabled}")
+
+            if st.button("⬅️ Previous",
+                         use_container_width=True,
+                         disabled=disabled,
+                         key="btn_prev"):
+                logger.info(f"[NAV] Previous button clicked")
+                clear_cache()
+
+                if prev_entry:
+                    image_id = prev_entry.get("image_id")
+                    logger.info(f"[NAV] Loading previous image: {image_id}")
+                    
+                    if image_id:
+                        try:
+                            img_doc = repo.get_image_doc(image_id)
+                        except AttributeError:
+                            img_doc = None
+
+                        if not img_doc:
+                            img_doc = {
+                                "image_id": image_id,
+                                "status": "labeled",
+                                "bb_url": prev_entry.get("bb_url", ""),
+                            }
+
+                        # Merge history data with image doc
+                        merged_task = {**prev_entry, **img_doc}
+                        st.session_state.current_task = merged_task
+                        logger.info(f"[NAV] Set current_task to: {image_id} (status: {merged_task.get('status')})")
+                        
+                        # Clear _last_loaded_id to force reload
+                        st.session_state._last_loaded_id = None
+                        st.rerun()
+
+        with nav_next:
+            is_labeled_now = task.get("status") == "labeled"
+            # Additional check: if this is a review image, user must save before proceeding
+            is_review_image = task.get("qa_status") == "review"
+            can_proceed_next = is_labeled_now and not is_review_image
+            logger.info(f"[NAV] Next button check - Current: {current_image_id} (status: {current_status}), is_review: {is_review_image}, enabled: {can_proceed_next}")
+            
+            if st.button("➡️ Next",
+                         use_container_width=True,
+                         disabled=not can_proceed_next,
+                         key="btn_next"):
+                logger.info(f"[NAV] Next button clicked")
+                
+                # ------------------------------------------------------------------
+                # Next navigation logic
+                # ------------------------------------------------------------------
+                next_task: dict | None = None
+
+                if task.get("status") == "labeled":
+                    # ---- Case A: we're on a labeled image – get the *next* labeled image ----
+                    try:
+                        hist = repo.get_user_history(st.session_state.username, limit=200)
+                        logger.info(f"[NAV] Retrieved {len(hist)} labeled images for next navigation")
+                    except Exception as e:
+                        logger.error(f"[NAV] Error getting history for next: {e}")
+                        hist = []
+
+                    if hist:
+                        # History is ordered DESCENDING (newest first)
+                        # So to get "next" (newer), we need to go to a lower index
+                        current_idx = None
+                        for idx, entry in enumerate(hist):
+                            if entry.get("image_id") == task["image_id"]:
+                                current_idx = idx
+                                break
+                        
+                        if current_idx is not None and current_idx > 0:
+                            # Found current image, get the previous one (newer timestamp)
+                            next_entry = hist[current_idx - 1]
+                            image_id = next_entry.get("image_id")
+                            logger.info(f"[NAV] Found next labeled image: {image_id} (idx: {current_idx - 1})")
+                            
+                            if image_id:
+                                try:
+                                    doc = repo.get_image_doc(image_id)
+                                except AttributeError:
+                                    doc = None
+                                if not doc:
+                                    doc = {
+                                        "image_id": image_id,
+                                        "status": "labeled",
+                                        "bb_url": next_entry.get("bb_url", ""),
+                                    }
+                                next_task = {**next_entry, **doc}
+                        else:
+                            logger.info(f"[NAV] Current image not found in history or is newest")
+
+                # ---- Case B: no further labeled images – fall back to in-progress queue ----
+                if next_task is None:
+                    logger.info(f"[NAV] No next labeled image, checking in-progress queue")
+                    # Use any preloaded history_stack first (these are usually in-progress)
+                    hist_stack: list = st.session_state.get("history_stack", [])
+                    logger.info(f"[NAV] History stack has {len(hist_stack)} items")
+                    
+                    # Remove any labeled entries from the stack
+                    while hist_stack and hist_stack[0].get("status") == "labeled":
+                        removed = hist_stack.pop(0)
+                        logger.info(f"[NAV] Removed labeled entry from stack: {removed.get('image_id')}")
+                    
+                    if hist_stack:
+                        next_task = hist_stack.pop(0)
+                        st.session_state.history_stack = hist_stack
+                        logger.info(f"[NAV] Got in-progress task from stack: {next_task.get('image_id')}")
+
+                # ---- Case C: still nothing – ask repo for a brand-new task ----
+                if next_task is None:
+                    logger.info(f"[NAV] No in-progress tasks, getting new task from repo")
+                    next_task = repo.get_next_task(st.session_state.username)
+                    if next_task:
+                        logger.info(f"[NAV] Got new task from repo: {next_task.get('image_id')}")
+                    else:
+                        logger.info(f"[NAV] No new tasks available")
+
+                # ------------------------------------------------------------------
+                # Update session & cache, no Firestore writes here
+                # ------------------------------------------------------------------
+                if next_task:
+                    clear_cache()
+                    st.session_state.current_task = next_task
+                    st.session_state._last_loaded_id = None  # Force reload
+                    logger.info(f"[NAV] Set current_task to: {next_task.get('image_id')} (status: {next_task.get('status')})")
+                    st.rerun()
+                else:
+                    logger.info(f"[NAV] No next task available")
+                    st.warning("No more images available")
+
+        # ------------------------------------------------------------------
+        # QA feedback / confirmation banners (positioned after navigation)
+        # ------------------------------------------------------------------
+        if task.get("qa_status") == "review":
+            fb = (task.get("qa_feedback") or "").strip()
+            if fb:
+                st.warning(f"✍️ **Reviewer feedback:**\n\n{fb}")
+            else:
+                st.info("🔄 **Reviewer has requested changes** – please update the labels.")
+        elif task.get("qa_status") == "confirmed":
+            st.success("✅ **Labels have been confirmed.** This image is read-only.")
+            confirmed_readonly = True
+
+        # Current Selections Display (from legacy)
+        sel_left, sel_mid, sel_right = st.columns([1, 4, 1], gap="small")
+        complete = ui.get_complete_chains()
+
+        # Get features from current session state (after restoration)
+        feats_by_loc = {}
+        for loc in sorted(leaves):
+            feats = []
+            if loc in ui.FEATURE_TAXONOMY:
+                for category in ui.FEATURE_TAXONOMY[loc]:
+                    sel_key = f"sel_{loc}_{category}"
+                    na_key = f"na_{loc}_{category}"
+                    
+                    # Get current state
+                    selections = st.session_state.get(sel_key, [])
+                    is_na = st.session_state.get(na_key, False)
+                    
+                    # If N/A is checked, don't show any features for this category
+                    if not is_na:
+                        # Add category context to features for better display
+                        for feature in selections:
+                            if feature == "None":
+                                feats.append(f"{category}: None")
+                            else:
+                                feats.append(f"{category}: {feature}")
+            feats_by_loc[loc] = feats
+
+        groups = list(feats_by_loc.items())
+
+        with sel_mid:
+            with st.expander("📋 Current Selections", expanded=True):
+                # ------------------------------------------------------------------
+                # 3-column grid: Locations | Features | Attributes
+                # ------------------------------------------------------------------
+                loc_col, feat_col, attr_col = st.columns([1, 1, 1], gap="medium")
+
+                # ---- Locations ----
+                with loc_col:
+                    st.subheader("Locations")
+                    if complete:
+                        for chain in complete:
+                            st.write("• " + " → ".join(chain))
+                    else:
+                        st.write("_(none selected)_")
+
+                # ---- Features ----
+                with feat_col:
+                    st.subheader("Features")
+                    
+                    # Hash current selections for change detection
+                    feature_hash = "|".join(
+                        f"{loc}:{','.join(sorted(feats))}" for loc, feats in sorted(feats_by_loc.items()) if feats
                     )
 
-                quality_display = st.session_state.condition_scores["quality_of_construction"] or "Not Selected"
-                scores_table_html += (
-                    f"<tr><td style='text-align:left; padding:2px'>Quality of Construction</td>"
-                    f"<td style='text-align:left; padding:2px'>{quality_display}</td></tr>"
-                )
+                    if not feature_hash:
+                        st.write("_(no features yet)_")
+                    else:
+                        # Rebuild table only if selections changed
+                        if cache_entry.get('feature_table_hash') != feature_hash:
+                            logger.info("[PERF] feature table rebuilt")
+                            headers = "".join(
+                                f"<th style='text-align:left; padding:4px'>{loc}</th>"
+                                for loc, feats in groups if feats
+                            )
+                            filtered_groups = [(loc, feats) for loc, feats in groups if feats]
+                            max_rows = max(len(feats) for _, feats in filtered_groups)
+                            rows_html = ""
+                            for i in range(max_rows):
+                                row_cells = ""
+                                for _, feats in filtered_groups:
+                                    if i < len(feats):
+                                        row_cells += (
+                                            "<td style='text-align:left; padding:2px'>"
+                                            f"• {feats[i]}"
+                                            "</td>"
+                                        )
+                                    else:
+                                        row_cells += "<td></td>"
+                                rows_html += f"<tr>{row_cells}</tr>"
 
-                improvement_display = st.session_state.condition_scores["improvement_condition"] or "Not Selected"
-                scores_table_html += (
-                    f"<tr><td style='text-align:left; padding:2px'>Improvement Condition</td>"
-                    f"<td style='text-align:left; padding:2px'>{improvement_display}</td></tr>"
-                )
+                            table_html = (
+                                "<table style='width:100%; border-collapse: collapse;'>"
+                                f"<tr>{headers}</tr>"
+                                f"{rows_html}"
+                                "</table>"
+                            )
 
-                scores_table_html += "</table>"
+                            cache_entry['feature_table_html'] = table_html
+                            cache_entry['feature_table_hash'] = feature_hash
+                        else:
+                            table_html = cache_entry['feature_table_html']
 
-                cache_entry['cond_scores_html'] = scores_table_html
-                cache_entry['cond_scores_hash'] = cs_state
+                        st.markdown(table_html, unsafe_allow_html=True)
 
-            st.markdown(cache_entry['cond_scores_html'], unsafe_allow_html=True)
+                # ---- Attributes ----
+                with attr_col:
+                    st.subheader("Attributes")
 
-    # ------------------------------------------------------------------
-    # Unified Action Buttons Row: Flag | Clear | Save | Refresh
-    # ------------------------------------------------------------------
+                    # Build hash for attribute selections
+                    attr_hash = hash(str(st.session_state.location_attributes))
 
-    current_validation = ui.can_move_on()  # refresh validation state
+                    if not st.session_state.location_attributes:
+                        st.write("_(no attributes yet)_")
+                    else:
+                        if cache_entry.get('attr_table_hash') != attr_hash:
+                            logger.info("[PERF] attribute table rebuilt")
+                            attr_table_html = "<table style='width:100%; border-collapse: collapse;'>"
+                            attr_table_html += "<tr><th style='text-align:left; padding:4px'>Location</th><th style='text-align:left; padding:4px'>Attribute</th><th style='text-align:left; padding:4px'>Value</th></tr>"
 
-    flag_col, clear_col, save_col, refresh_col = st.columns([1, 1, 1, 1], gap="small")
+                            for location_key, attrs in st.session_state.location_attributes.items():
+                                if not attrs:
+                                    continue
+                                loc_parts = location_key.split('_', 2)
+                                if len(loc_parts) < 3:
+                                    continue
+                                location_name = loc_parts[2]
 
-    # Flag / Unflag
-    with flag_col:
-        flag_text = "🚩 Unflag" if st.session_state.flagged else "🚩 Flag for Review"
-        flag_type = "secondary" if st.session_state.flagged else "primary"
-        if st.button(flag_text, type=flag_type, use_container_width=True, key="btn_flag"):
-            st.session_state.flagged = not st.session_state.flagged
-            st.rerun()
+                                for attr, value in attrs.items():
+                                    if value:
+                                        attr_display = attr.replace("_", " ").title()
+                                        attr_table_html += (
+                                            f"<tr><td style='text-align:left; padding:2px'>{location_name}</td>"
+                                            f"<td style='text-align:left; padding:2px'>{attr_display}</td>"
+                                            f"<td style='text-align:left; padding:2px'>{value}</td></tr>"
+                                        )
 
-    # Clear Labels
-    with clear_col:
-        if st.button("🗑️ Clear Labels", use_container_width=True, key="btn_clear"):
-            ui.reset_session_state_to_defaults()
-            st.session_state.skip_label_loading = True
-            st.rerun()
+                            attr_table_html += "</table>"
 
-    # Save Labels
-    with save_col:
-        if st.button("💾 Save Labels", type="primary", use_container_width=True,
-                     disabled=not current_validation, key="btn_save"):
-            payload = _build_payload()
-            logger.info(f"[FS] Saving labels for image {task['image_id']}")
-            repo.save_labels(task["image_id"], payload, st.session_state.username)
-            update_cache_with_saved_data(task["image_id"], payload)
-            # Mark as labeled for downstream logic
-            task["status"] = "labeled"
-            st.session_state.current_task = task  # Update the session state with the new status
-            st.success("Saved ✔︎")
-            st.rerun()
+                            cache_entry['attr_table_html'] = attr_table_html
+                            cache_entry['attr_table_hash'] = attr_hash
+                        st.markdown(cache_entry['attr_table_html'], unsafe_allow_html=True)
 
-    # Refresh from Firestore
-    with refresh_col:
-        if st.button("🔄 Refresh", type="secondary", use_container_width=True, key="btn_refresh"):
-            clear_cache()
-            st.session_state._last_loaded_id = None  # force reload on rerun
-            st.rerun()
+                # ---------------- Condition Scores ------------------
+                st.subheader("Condition Scores")
 
-    # ------------------------------------------------------------------
-    # Complex widgets imported from legacy via ui_components -------------
-    # ------------------------------------------------------------------
+                cond = st.session_state.condition_scores  # type: ignore[attr-defined]
 
-    col_left, col_mid, col_right = st.columns([1.0, 1.0, 1.0])
-    with col_left:
-        ui.build_dropdown_cascade_ui()
-    with col_mid:
-        ui.build_feature_ui()
-    with col_right:
-        ui.build_contextual_attribute_ui()
+                # Build stable hash string so equality survives reruns
+                na_flag = bool(st.session_state.get("property_condition_na", False))
+                prop_score_val = round(cond["property_condition"], 3)
+                quality_val = cond["quality_of_construction"] or ""
+                improvement_val = cond["improvement_condition"] or ""
 
-    st.markdown("---")
-    ui.build_condition_scores_ui()
+                cs_state = f"{na_flag}|{prop_score_val:.3f}|{quality_val}|{improvement_val}"
 
-    # Additional Information
-    st.subheader("📝 Additional Information")
-    st.session_state.notes = st.text_area("Notes", value=st.session_state.notes, height=80)
+                if cache_entry.get('cond_scores_hash') != cs_state:
+                    logger.info("[PERF] condition table rebuilt")
+                    scores_table_html = "<table style='width:100%; border-collapse: collapse;'>"
+                    scores_table_html += "<tr><th style='text-align:left; padding:4px'>Category</th><th style='text-align:left; padding:4px'>Score/Selection</th></tr>"
 
-    # Go-to-page navigation is an admin-only feature
-    final_validation = ui.can_move_on()
+                    prop_score = st.session_state.condition_scores['property_condition']
+                    if st.session_state.get("property_condition_na", False):
+                        scores_table_html += (
+                            "<tr><td style='text-align:left; padding:2px'>Property Condition</td>"
+                            "<td style='text-align:left; padding:2px'>N/A (N/A)</td></tr>"
+                        )
+                    else:
+                        score_interpretation = {
+                            **{k: "Excellent" for k in [round(x/10,1) for x in range(10,20)]},
+                            **{k: "Good" for k in [round(x/10,1) for x in range(20,30)]},
+                            **{k: "Average" for k in [round(x/10,1) for x in range(30,40)]},
+                            **{k: "Fair" for k in [round(x/10,1) for x in range(40,50)]},
+                            5.0: "Poor",
+                        }
+                        closest = min(score_interpretation, key=lambda x: abs(x - prop_score))
+                        interp = score_interpretation[closest]
+                        scores_table_html += (
+                            f"<tr><td style='text-align:left; padding:2px'>Property Condition</td>"
+                            f"<td style='text-align:left; padding:2px'>{prop_score:.3f} ({interp})</td></tr>"
+                        )
 
-    if is_admin:
-        go_left, go_mid, go_right = st.columns([3, 1, 3], gap="small")
-        with go_mid:
-            goto = st.number_input(
-                "Go to page",
-                min_value=1,
-                max_value=1000,  # Reasonable upper bound
-                value=1,
-                step=1,
-                key="goto_input_bottom",
-                label_visibility="collapsed"
-            )
-            if st.button(
-                "🔎 Go",
-                use_container_width=True,
-                disabled=not final_validation,
-                key="btn_goto_bottom",
-            ):
-                # Save current task first
-                payload = _build_payload()
-                logger.info(f"[FS] Saving labels for image {task['image_id']} (Go)")
-                repo.save_labels(task["image_id"], payload, st.session_state.username)
-                # Update cache with saved data
-                update_cache_with_saved_data(task["image_id"], payload)
-                # Clear cache and load next image
-                clear_cache()
-                st.session_state.current_task = None  # triggers get_next_task on rerun
+                    quality_display = st.session_state.condition_scores["quality_of_construction"] or "Not Selected"
+                    scores_table_html += (
+                        f"<tr><td style='text-align:left; padding:2px'>Quality of Construction</td>"
+                        f"<td style='text-align:left; padding:2px'>{quality_display}</td></tr>"
+                    )
+
+                    improvement_display = st.session_state.condition_scores["improvement_condition"] or "Not Selected"
+                    scores_table_html += (
+                        f"<tr><td style='text-align:left; padding:2px'>Improvement Condition</td>"
+                        f"<td style='text-align:left; padding:2px'>{improvement_display}</td></tr>"
+                    )
+
+                    scores_table_html += "</table>"
+
+                    cache_entry['cond_scores_html'] = scores_table_html
+                    cache_entry['cond_scores_hash'] = cs_state
+
+                st.markdown(cache_entry['cond_scores_html'], unsafe_allow_html=True)
+
+        # Unified Action Buttons Row: Flag | Clear | Save | Refresh (moved right after Current Selections)
+        current_validation = ui.can_move_on()  # refresh validation state
+        flag_col, clear_col, save_col, refresh_col = st.columns([1, 1, 1, 1], gap="small")
+
+        # Flag / Unflag
+        with flag_col:
+            flag_text = "🚩 Unflag" if st.session_state.flagged else "🚩 Flag for Review"
+            flag_type = "secondary" if st.session_state.flagged else "primary"
+            if st.button(flag_text, type=flag_type, use_container_width=True, key="btn_flag"):
+                st.session_state.flagged = not st.session_state.flagged
                 st.rerun()
+
+        # Clear Labels
+        with clear_col:
+            if st.button("🗑️ Clear Labels", use_container_width=True, key="btn_clear"):
+                ui.reset_session_state_to_defaults()
+                st.session_state.skip_label_loading = True
+                st.rerun()
+
+        # Save Labels
+        with save_col:
+            if st.button("💾 Save Labels", type="primary", use_container_width=True,
+                         disabled=not current_validation, key="btn_save"):
+                payload = _build_payload()
+                logger.info(f"[FS] Saving labels for image {task['image_id']}")
+                repo.save_labels(task["image_id"], payload, st.session_state.username)
+                update_cache_with_saved_data(task["image_id"], payload)
+                # Mark as labeled for downstream logic
+                task["status"] = "labeled"
+                st.session_state.current_task = task  # Update the session state with the new status
+                st.success("Saved ✔︎")
+                st.rerun()
+
+        # Refresh from Firestore
+        with refresh_col:
+            if st.button("🔄 Refresh", type="secondary", use_container_width=True, key="btn_refresh"):
+                clear_cache()
+                st.session_state._last_loaded_id = None  # force reload on rerun
+                st.rerun()
+
+        # Main labeling UI components
+        col_left, col_mid, col_right = st.columns([1.0, 1.0, 1.0])
+        with col_left:
+            ui.build_dropdown_cascade_ui()
+        with col_mid:
+            ui.build_feature_ui()
+        with col_right:
+            ui.build_contextual_attribute_ui()
+
+        st.markdown("---")
+        ui.build_condition_scores_ui()
+
+        # Notes section
+        st.subheader("📝 Additional Information")
+        st.session_state.notes = st.text_area("Notes", value=st.session_state.notes, height=80)
+
+        # Go-to-page navigation is an admin-only feature
+        final_validation = ui.can_move_on()
+
+        if is_admin:
+            go_left, go_mid, go_right = st.columns([3, 1, 3], gap="small")
+            with go_mid:
+                goto = st.number_input(
+                    "Go to page",
+                    min_value=1,
+                    max_value=1000,  # Reasonable upper bound
+                    value=1,
+                    step=1,
+                    key="goto_input_bottom",
+                    label_visibility="collapsed"
+                )
+                if st.button(
+                    "🔎 Go",
+                    use_container_width=True,
+                    disabled=not final_validation,
+                    key="btn_goto_bottom",
+                ):
+                    # Save current task first
+                    payload = _build_payload()
+                    logger.info(f"[FS] Saving labels for image {task['image_id']} (Go)")
+                    repo.save_labels(task["image_id"], payload, st.session_state.username)
+                    # Update cache with saved data
+                    update_cache_with_saved_data(task["image_id"], payload)
+                    # Clear cache and load next image
+                    clear_cache()
+                    st.session_state.current_task = None  # triggers get_next_task on rerun
+                    st.rerun()
 
     # Admin-only debug panels ---------------------------------------------------
     if is_admin:

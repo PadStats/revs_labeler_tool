@@ -53,7 +53,17 @@ def main() -> None:
         print("Image doc not found")
         return
 
-    updates = {"status": "removed", "assigned_to": None, "task_expires_at": None}
+    updates = {
+        "status": "removed",
+        "assigned_to": None,
+        "task_expires_at": None,
+        "qa_status": "pending",  # reset QA state
+        "qa_feedback": firestore.DELETE_FIELD,
+        "review_requested_by": firestore.DELETE_FIELD,
+        "timestamp_review_requested": firestore.DELETE_FIELD,
+        "confirmed_by": firestore.DELETE_FIELD,
+        "timestamp_confirmed": firestore.DELETE_FIELD,
+    }
     img_ref.update(updates)
     print("✓ image status set to 'removed'.")
 
