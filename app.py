@@ -10,6 +10,8 @@ import base64
 
 import streamlit as st
 
+from google.cloud import firestore  # <-- Add this import
+
 from labeler_backend import get_repo
 import ui_components as ui
 from labeler_backend.bb_resolver import BackblazeResolverError  # new import
@@ -250,6 +252,21 @@ def main() -> None:  # noqa: C901
     if not st.session_state.get("authenticated"):
         show_login_gate()
         return
+
+    # God mode check - must be before any other logic
+    is_god = st.session_state.get("role") == "god"
+    if is_god:
+        # Load repo first (needed for god mode)
+        mode = os.getenv("LABEL_REPO", "dev")
+        if (
+            "repo" not in st.session_state  # first run
+            or st.session_state.get("repo_mode") != mode  # mode changed
+        ):
+            st.session_state.repo = get_repo(mode)
+            st.session_state.repo_mode = mode
+        repo = st.session_state.repo
+        god_mode_view(repo)
+        return  # Exit early - no other UI should render
 
     # ------------------------------------------------------------------
     # HEADER CONTAINER – we will populate it later once image and metadata
@@ -2081,6 +2098,273 @@ def _inject_dynamic_spacer(pixels: int) -> None:
         f"<style>div.block-container{{padding-top:{pixels}px !important;}}</style>",
         unsafe_allow_html=True,
     )
+
+def god_mode_view(repo):
+    import streamlit as st
+    st.set_page_config(page_title="Property Labeler – God Mode", layout="wide")
+    _inject_compact_css()
+    st.markdown("# 👁️ Read-Only God Mode")
+    st.info("You are in read-only god mode. You can view all labeled images, but cannot edit or confirm anything.")
+
+    # Get all labeled images, ordered by timestamp_labeled DESC
+    if "god_image_list" not in st.session_state:
+        # Query all labeled images (status == 'labeled')
+        images = repo.images.where("status", "==", "labeled").order_by("timestamp_labeled", direction=firestore.Query.DESCENDING).stream()
+        st.session_state.god_image_list = [img.id for img in images]
+    image_list = st.session_state.god_image_list
+
+    # Track current index
+    if "god_current_idx" not in st.session_state:
+        st.session_state.god_current_idx = 0
+    idx = st.session_state.god_current_idx
+    if not image_list:
+        st.warning("No labeled images found.")
+        return
+    # Clamp idx
+    idx = max(0, min(idx, len(image_list)-1))
+    st.session_state.god_current_idx = idx
+    image_id = image_list[idx]
+    # Load image doc and labels
+    img_doc = repo.get_image_doc(image_id) or {}
+    labels = repo.load_labels(image_id) or {}
+
+    # Display the image FIRST (above navigation)
+    st.markdown(f"## Image ID: `{image_id}`")
+    
+    # Image loading and display (same as main app)
+    image_displayed = False
+    
+    try:
+        # Get the resolved image URL
+        resolved_url = repo.get_image_url(img_doc)
+        
+        # Try to download and display the image
+        response = requests.get(resolved_url, timeout=10)
+        response.raise_for_status()
+        content_type = response.headers.get('content-type', '')
+        if not content_type.startswith('image/'):
+            raise ValueError(f"URL returned non-image content: {content_type}")
+        
+        img_bytes = response.content
+        img = Image.open(BytesIO(img_bytes))
+        img_b64 = base64.b64encode(img_bytes).decode()
+        
+        # Display using the same HTML function as main app
+        image_html = _html_image_from_b64(img_b64, img.size[0], img.size[1], "God Mode", image_id, admin=True)
+        st.markdown(image_html, unsafe_allow_html=True)
+        image_displayed = True
+        
+    except Exception as e:
+        # Fallback to simple st.image display
+        try:
+            if 'resolved_url' in locals():
+                st.image(resolved_url, use_container_width=True)
+                image_displayed = True
+            else:
+                st.error(f"❌ Failed to load image: {e}")
+        except Exception as e2:
+            st.error(f"❌ Failed to display image: {e2}")
+    
+    if not image_displayed:
+        st.warning("⚠️ Unable to load image for this entry")
+
+    # Navigation controls (below image)
+    nav_left, nav_prev, nav_next, nav_right = st.columns([3, 1, 1, 3], gap="small")
+    with nav_prev:
+        if st.button("⬅️ Previous", use_container_width=True, disabled=(idx==0), key="god_btn_prev"):
+            st.session_state.god_current_idx = max(0, idx-1)
+            st.rerun()
+    with nav_next:
+        if st.button("➡️ Next", use_container_width=True, disabled=(idx==len(image_list)-1), key="god_btn_next"):
+            st.session_state.god_current_idx = min(len(image_list)-1, idx+1)
+            st.rerun()
+    with nav_right:
+        jump_id = st.text_input("Jump to image ID", value="", key="god_jump_id")
+        if st.button("Go", use_container_width=True, key="god_btn_jump"):
+            if jump_id in image_list:
+                st.session_state.god_current_idx = image_list.index(jump_id)
+                st.rerun()
+            else:
+                st.warning("Image ID not found in labeled images.")
+
+    # Display labels nicely (same as admin review mode)
+    st.markdown("---")
+    st.markdown("## 📋 Current Labels (Read-Only)")
+    
+    # Parse labels from database and recreate session state structure for display
+    if labels:
+        # Parse spatial labels
+        raw_spatial = labels.get("spatial_labels", [])
+        if isinstance(raw_spatial, str):
+            labels_list = [s for s in raw_spatial.split("|") if s]
+        else:
+            labels_list = raw_spatial
+        
+        # Convert to complete chains for display (simplified approach)
+        complete = []
+        for label_string in labels_list:
+            if label_string and ' → ' in label_string:
+                # Split hierarchical labels on the arrow separator
+                chain = [part.strip() for part in label_string.split(' → ')]
+                complete.append(chain)
+            elif label_string:
+                # Simple single-level label
+                complete.append([label_string])
+        
+        # Parse feature labels
+        features_raw = labels.get("feature_labels", [])
+        if isinstance(features_raw, str):
+            feature_list = features_raw.split("|") if features_raw else []
+        else:
+            feature_list = features_raw
+        
+        # Group features by location and category
+        feats_by_loc = {}
+        for feature_entry in feature_list:
+            if ":" in feature_entry:
+                parts = feature_entry.split(":", 2)
+                if len(parts) == 3:
+                    location, category, feature = parts
+                    if location not in feats_by_loc:
+                        feats_by_loc[location] = []
+                    if feature == "None":
+                        feats_by_loc[location].append(f"{category}: None")
+                    else:
+                        feats_by_loc[location].append(f"{category}: {feature}")
+        
+        # Parse attributes
+        attributes = labels.get("attributes", {})
+        
+        # Parse condition scores
+        condition_scores = labels.get("condition_scores", {})
+        
+        # Display in 4-column layout (same as admin review)
+        loc_col, feat_col, attr_col, cond_col = st.columns([1, 1, 1, 1], gap="medium")
+        
+        # ---- Locations ----
+        with loc_col:
+            st.markdown("### 🏠 Locations")
+            if complete:
+                for chain in complete:
+                    st.markdown(f"**•** {' → '.join(chain)}")
+            else:
+                st.markdown("*No locations selected*")
+        
+        # ---- Features ----
+        with feat_col:
+            st.markdown("### 🔧 Features")
+            
+            if not feats_by_loc:
+                st.markdown("*No features selected*")
+            else:
+                # Create a nice table using pandas
+                import pandas as pd
+                
+                table_data = []
+                for loc, feats in feats_by_loc.items():
+                    if feats:
+                        for feat in feats:
+                            if ": " in feat:
+                                category, feature_name = feat.split(": ", 1)
+                                table_data.append({
+                                    "Location": loc,
+                                    "Category": category,
+                                    "Feature": feature_name
+                                })
+                            else:
+                                table_data.append({
+                                    "Location": loc,
+                                    "Category": "General",
+                                    "Feature": feat
+                                })
+                
+                if table_data:
+                    df = pd.DataFrame(table_data)
+                    st.dataframe(
+                        df,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Location": st.column_config.TextColumn("Location", width="small"),
+                            "Category": st.column_config.TextColumn("Category", width="medium"),
+                            "Feature": st.column_config.TextColumn("Feature", width="medium")
+                        }
+                    )
+        
+        # ---- Attributes ----
+        with attr_col:
+            st.markdown("### 📊 Attributes")
+            
+            if not attributes:
+                st.markdown("*No attributes set*")
+            else:
+                for attr, value in attributes.items():
+                    if value is not None:
+                        attr_display = attr.replace("_", " ").title()
+                        st.markdown(f"**{attr_display}:** {value}")
+        
+        # ---- Condition Scores ----
+        with cond_col:
+            st.markdown("### 🏗️ Condition Scores")
+            
+            prop_score = condition_scores.get('property_condition')
+            if prop_score is None:
+                st.markdown("**Property Condition:** N/A")
+            else:
+                score_interpretation = {
+                    **{k: "Excellent" for k in [round(x/10,1) for x in range(10,20)]},
+                    **{k: "Good" for k in [round(x/10,1) for x in range(20,30)]},
+                    **{k: "Average" for k in [round(x/10,1) for x in range(30,40)]},
+                    **{k: "Fair" for k in [round(x/10,1) for x in range(40,50)]},
+                    5.0: "Poor",
+                }
+                closest = min(score_interpretation, key=lambda x: abs(x - prop_score))
+                interp = score_interpretation[closest]
+                st.markdown(f"**Property Condition:** {prop_score:.3f} ({interp})")
+            
+            quality_display = condition_scores.get("quality_of_construction") or "Not Selected"
+            st.markdown(f"**Quality of Construction:** {quality_display}")
+            
+            improvement_display = condition_scores.get("improvement_condition") or "Not Selected"
+            st.markdown(f"**Improvement Condition:** {improvement_display}")
+        
+        # Notes section
+        st.markdown("---")
+        st.markdown("### 📝 Notes")
+        notes = labels.get("notes", "").strip()
+        if notes:
+            st.markdown(f"**Labeler Notes:** {notes}")
+        else:
+            st.markdown("*No notes provided*")
+    
+    else:
+        st.warning("*No labels found for this image*")
+
+    # Raw data section (collapsible)
+    st.markdown("---")
+    with st.expander("🔍 Raw Data", expanded=False):
+        st.write("### Image Metadata:")
+        st.json(img_doc, expanded=False)
+        st.write("### Labels:")
+        st.json(labels, expanded=False)
+    
+    # Status info
+    st.write("---")
+    st.write(f"**QA Status:** {img_doc.get('qa_status', 'N/A')}")
+    st.write(f"**Labeled by:** {labels.get('labeled_by', 'N/A')}")
+    st.write(f"**Timestamp Labeled:** {img_doc.get('timestamp_labeled', 'N/A')}")
+    st.write(f"**Confirmed by:** {img_doc.get('confirmed_by', 'N/A')}")
+    st.write(f"**Status:** {img_doc.get('status', 'N/A')}")
+    st.write(f"**Assigned to:** {img_doc.get('assigned_to', 'N/A')}")
+    st.write(f"**Flagged:** {img_doc.get('flagged', False)}")
+    st.write(f"**QA Feedback:** {img_doc.get('qa_feedback', '')}")
+    st.write(f"**Review Requested By:** {img_doc.get('review_requested_by', '')}")
+    st.write(f"**Timestamp Confirmed:** {img_doc.get('timestamp_confirmed', 'N/A')}")
+    st.write(f"**Timestamp Uploaded:** {img_doc.get('timestamp_uploaded', 'N/A')}")
+    st.write(f"**Timestamp Assigned:** {img_doc.get('timestamp_assigned', 'N/A')}")
+    st.write(f"**Task Expires At:** {img_doc.get('task_expires_at', 'N/A')}")
+    st.write(f"**Property ID:** {img_doc.get('property_id', 'N/A')}")
+    st.write(f"**Any other fields:** { {k:v for k,v in img_doc.items() if k not in ['qa_status','confirmed_by','status','assigned_to','flagged','qa_feedback','review_requested_by','timestamp_confirmed','timestamp_uploaded','timestamp_assigned','task_expires_at','property_id']} }")
 
 
 if __name__ == "__main__":
