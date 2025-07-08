@@ -933,7 +933,25 @@ def main() -> None:  # noqa: C901
             has_next = False
 
         with nav_prev:
-            if st.button("⬅️ Previous", use_container_width=True, disabled=not has_prev, key="admin_btn_prev"):
+            # Check if we have a last action that can be undone
+            last_action = st.session_state.get("last_review_action")
+            can_undo = last_action and last_action.get("image_id") != task.get("image_id")
+            has_prev_or_undo = has_prev or can_undo
+            
+            if st.button("⬅️ Previous", use_container_width=True, disabled=not has_prev_or_undo, key="admin_btn_prev"):
+                # First check if we should load the last action image
+                if can_undo:
+                    # Load the last confirmed/needs_changes image
+                    last_image_id = last_action["image_id"]
+                    img_doc = repo.get_image_doc(last_image_id)
+                    if img_doc:
+                        st.session_state.current_task = img_doc
+                        # Clear the last action since we're now viewing it
+                        st.session_state.last_review_action = None
+                        st.rerun()
+                        return
+                
+                # Fall back to normal previous logic
                 prev_task = repo.get_prev_review_task(review_target_user, before_image_id=task["image_id"])
                 if prev_task:
                     st.session_state.current_task = prev_task
@@ -946,6 +964,21 @@ def main() -> None:  # noqa: C901
                     st.session_state.current_task = next_task
                     st.rerun()
 
+        # Debug info in admin review mode
+        with st.expander("🔍 Debug Info", expanded=False):
+            st.write(f"**Mode:** {admin_mode}")
+            st.write(f"**Review Target:** {review_target_user}")
+            last_action = st.session_state.get("last_review_action")
+            if last_action:
+                st.write("**Last Review Action:**")
+                st.json(last_action)
+            else:
+                st.write("**Last Review Action:** None")
+            
+            st.write(f"**Current Task ID:** {task.get('image_id', 'None')}")
+            st.write(f"**Task Status:** {task.get('status', 'None')}")
+            st.write(f"**QA Status:** {task.get('qa_status', 'None')}")
+
         # QA feedback and action buttons
         st.markdown("---")
         # Pre-populate feedback box with existing feedback (if any)
@@ -955,11 +988,24 @@ def main() -> None:  # noqa: C901
         with col_c:
             if st.button("✅ Confirm", type="primary", use_container_width=True):
                 repo.confirm_labels(task["image_id"], st.session_state.username)
+                # Store last action for potential undo
+                st.session_state.last_review_action = {
+                    "image_id": task["image_id"],
+                    "action": "confirmed",
+                    "labeler": review_target_user
+                }
                 st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])
                 st.rerun()
         with col_r:
             if st.button("↩️ Needs changes", use_container_width=True):
                 repo.request_revision(task["image_id"], review_target_user, st.session_state.username, fb_input)
+                # Store last action for potential undo
+                st.session_state.last_review_action = {
+                    "image_id": task["image_id"],
+                    "action": "needs_changes",
+                    "labeler": review_target_user,
+                    "feedback": fb_input
+                }
                 st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])
                 st.rerun()
 
@@ -1313,6 +1359,25 @@ def main() -> None:  # noqa: C901
                 else:
                     logger.info(f"[NAV] No next task available")
                     st.warning("No more images available")
+
+        # ------------------------------------------------------------------
+        # Debug info for admins
+        # ------------------------------------------------------------------
+        if is_admin:
+            with st.expander("🔍 Debug Info", expanded=False):
+                st.write(f"**Mode:** {admin_mode}")
+                if admin_mode == "Review":
+                    st.write(f"**Review Target:** {review_target_user}")
+                    last_action = st.session_state.get("last_review_action")
+                    if last_action:
+                        st.write("**Last Review Action:**")
+                        st.json(last_action)
+                    else:
+                        st.write("**Last Review Action:** None")
+                
+                st.write(f"**Current Task ID:** {task.get('image_id', 'None')}")
+                st.write(f"**Task Status:** {task.get('status', 'None')}")
+                st.write(f"**QA Status:** {task.get('qa_status', 'None')}")
 
         # ------------------------------------------------------------------
         # QA feedback / confirmation banners (positioned after navigation)
