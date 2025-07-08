@@ -56,6 +56,7 @@ def main() -> None:
     updates = {
         "status": "removed",
         "assigned_to": None,
+        "timestamp_assigned": None,  # Clear assignment timestamp when retiring
         "task_expires_at": None,
         "qa_status": "pending",  # reset QA state
         "qa_feedback": firestore.DELETE_FIELD,

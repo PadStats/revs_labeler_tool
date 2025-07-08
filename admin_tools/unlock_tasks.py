@@ -14,6 +14,9 @@ To actually unlock:
     python -m admin_tools.unlock_tasks --execute            # unlock *all*
     python -m admin_tools.unlock_tasks --stale --execute    # only stale
     python -m admin_tools.unlock_tasks IMG123 --execute     # specific image
+    
+    # See everything Bob currently has locked
+    python -m admin_tools.unlock_tasks --user bob
 
 Flags:
   --stale    Only unlock tasks whose `task_expires_at` is earlier than now.
@@ -108,6 +111,7 @@ def main() -> None:
             {
                 "status": "unlabeled",
                 "assigned_to": None,
+                "timestamp_assigned": None,  # Clear assignment timestamp when unlocking
                 "task_expires_at": None,
                 "qa_status": "pending",
                 "qa_feedback": firestore.DELETE_FIELD,

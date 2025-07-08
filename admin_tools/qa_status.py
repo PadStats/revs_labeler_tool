@@ -4,6 +4,7 @@ Usage examples:
     python -m admin_tools.qa_status confirm <image_id>
     python -m admin_tools.qa_status review  <image_id> --labeler bob --feedback "Wrong location"
     python -m admin_tools.qa_status reset   <image_id> --labeler bob
+    python -m admin_tools.qa_status assign  <image_id> --labeler bob
     python -m admin_tools.qa_status show    <image_id>
     python -m admin_tools.qa_status list    --status confirmed
     python -m admin_tools.qa_status list    --status review --labeler bob
@@ -70,6 +71,26 @@ def reset_to_pending(img_id: str, labeler: str, admin: str) -> None:
         },
     )
     print(f"{img_id}: qa_status -> pending (all QA fields cleared, assigned to {labeler})")
+
+
+def assign_task(img_id: str, labeler: str, admin: str) -> None:
+    """Properly assign an image to a labeler as an active task (like get_next_task does)."""
+    from datetime import datetime, timedelta
+    
+    # Calculate expiration time (same as get_next_task)
+    expires_at = datetime.utcnow() + timedelta(minutes=30)  # 30 minute lock window
+    
+    _update_status(
+        img_id,
+        {
+            "status": "in_progress",
+            "assigned_to": labeler,
+            "timestamp_assigned": firestore.SERVER_TIMESTAMP,
+            "task_expires_at": expires_at,
+            "qa_status": "pending",  # Ensure it's pending for review later
+        },
+    )
+    print(f"{img_id}: assigned to {labeler} as active task (expires at {expires_at})")
 
 
 def show(img_id: str) -> None:
@@ -184,6 +205,12 @@ def _build_parser() -> argparse.ArgumentParser:
     reset.add_argument("--labeler", required=True, help="Labeler to assign the image to")
     reset.add_argument("--admin", required=True, help="Username of the admin performing the action")
 
+    # assign (new command)
+    assign = sub.add_parser("assign", help="Assign image to labeler as active task")
+    assign.add_argument("image_id")
+    assign.add_argument("--labeler", required=True, help="Labeler to assign the task to")
+    assign.add_argument("--admin", required=True, help="Username of the admin performing the action")
+
     # show
     s = sub.add_parser("show", help="Show image QA fields")
     s.add_argument("image_id")
@@ -208,6 +235,8 @@ def main(argv: Optional[list[str]] = None) -> None:  # pragma: no cover
         review(args.image_id, args.labeler, args.admin, args.feedback)
     elif args.cmd == "reset":
         reset_to_pending(args.image_id, args.labeler, args.admin)
+    elif args.cmd == "assign":
+        assign_task(args.image_id, args.labeler, args.admin)
     elif args.cmd == "show":
         show(args.image_id)
     elif args.cmd == "list":

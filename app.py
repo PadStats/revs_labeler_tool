@@ -610,13 +610,36 @@ def main() -> None:  # noqa: C901
                     elif improvement_val == "N/A":
                         improvement_val = "N/A"
                     
-                    st.session_state.condition_scores = {
-                        "property_condition": float(prop_val),
-                        "quality_of_construction": quality_val,
-                        "improvement_condition": improvement_val,
-                    }
-                    st.session_state.property_condition_na = False
-                    st.session_state.property_condition_confirmed = True
+                    # Check for NaN in existing property_condition
+                    try:
+                        prop_float = float(prop_val)
+                        import math
+                        if math.isnan(prop_float):
+                            # NaN found in existing labels - treat as N/A
+                            st.session_state.condition_scores = {
+                                "property_condition": 3.0,
+                                "quality_of_construction": quality_val,
+                                "improvement_condition": improvement_val,
+                            }
+                            st.session_state.property_condition_na = True
+                            st.session_state.property_condition_confirmed = False
+                        else:
+                            st.session_state.condition_scores = {
+                                "property_condition": prop_float,
+                                "quality_of_construction": quality_val,
+                                "improvement_condition": improvement_val,
+                            }
+                            st.session_state.property_condition_na = False
+                            st.session_state.property_condition_confirmed = True
+                    except (TypeError, ValueError):
+                        # Fallback for unparseable values
+                        st.session_state.condition_scores = {
+                            "property_condition": 3.0,
+                            "quality_of_construction": quality_val,
+                            "improvement_condition": improvement_val,
+                        }
+                        st.session_state.property_condition_na = True
+                        st.session_state.property_condition_confirmed = False
 
                 st.session_state.persistent_condition_state = {
                     "property_condition": st.session_state.condition_scores["property_condition"],
@@ -637,13 +660,36 @@ def main() -> None:  # noqa: C901
                     st.session_state.property_condition_na = True
                     st.session_state.property_condition_confirmed = False
                 else:
-                    st.session_state.condition_scores = {
-                        "property_condition": float(prop_val),
-                        "quality_of_construction": "",
-                        "improvement_condition": "",
-                    }
-                    st.session_state.property_condition_na = False
-                    st.session_state.property_condition_confirmed = True
+                    # Check for NaN in legacy condition_score
+                    try:
+                        prop_float = float(prop_val)
+                        import math
+                        if math.isnan(prop_float):
+                            # NaN found in legacy score - treat as N/A
+                            st.session_state.condition_scores = {
+                                "property_condition": 3.0,
+                                "quality_of_construction": "",
+                                "improvement_condition": "",
+                            }
+                            st.session_state.property_condition_na = True
+                            st.session_state.property_condition_confirmed = False
+                        else:
+                            st.session_state.condition_scores = {
+                                "property_condition": prop_float,
+                                "quality_of_construction": "",
+                                "improvement_condition": "",
+                            }
+                            st.session_state.property_condition_na = False
+                            st.session_state.property_condition_confirmed = True
+                    except (TypeError, ValueError):
+                        # Fallback for unparseable legacy values
+                        st.session_state.condition_scores = {
+                            "property_condition": 3.0,
+                            "quality_of_construction": "",
+                            "improvement_condition": "",
+                        }
+                        st.session_state.property_condition_na = True
+                        st.session_state.property_condition_confirmed = False
 
                 st.session_state.persistent_condition_state = {
                     "property_condition": st.session_state.condition_scores["property_condition"],
@@ -695,19 +741,50 @@ def main() -> None:  # noqa: C901
                 st.session_state.property_condition_na = True
             else:
                 try:
-                    st.session_state.condition_scores = {
-                        "property_condition": float(prop_val),
-                        "quality_of_construction": "",
-                        "improvement_condition": "",
-                    }
+                    prop_float = float(prop_val)
+                    # Check for NaN values and treat them as N/A
+                    import math
+                    if math.isnan(prop_float):
+                        st.session_state.condition_scores = {
+                            "property_condition": 3.0,
+                            "quality_of_construction": "",
+                            "improvement_condition": "",
+                        }
+                        st.session_state.property_condition_na = True
+                    else:
+                        st.session_state.condition_scores = {
+                            "property_condition": prop_float,
+                            "quality_of_construction": "",
+                            "improvement_condition": "",
+                        }
+                        st.session_state.property_condition_na = False
                 except (TypeError, ValueError):
                     # If the value is not directly castable (e.g. Decimal), fall back.
-                    st.session_state.condition_scores = {
-                        "property_condition": float(str(prop_val)),
-                        "quality_of_construction": "",
-                        "improvement_condition": "",
-                    }
-                st.session_state.property_condition_na = False
+                    try:
+                        prop_float = float(str(prop_val))
+                        import math
+                        if math.isnan(prop_float):
+                            st.session_state.condition_scores = {
+                                "property_condition": 3.0,
+                                "quality_of_construction": "",
+                                "improvement_condition": "",
+                            }
+                            st.session_state.property_condition_na = True
+                        else:
+                            st.session_state.condition_scores = {
+                                "property_condition": prop_float,
+                                "quality_of_construction": "",
+                                "improvement_condition": "",
+                            }
+                            st.session_state.property_condition_na = False
+                    except (TypeError, ValueError):
+                        # Completely unparseable - treat as N/A
+                        st.session_state.condition_scores = {
+                            "property_condition": 3.0,
+                            "quality_of_construction": "",
+                            "improvement_condition": "",
+                        }
+                        st.session_state.property_condition_na = True
 
             # For images yet to be reviewed by a human the score is *not* confirmed.
             st.session_state.property_condition_confirmed = False
@@ -1813,8 +1890,23 @@ def _build_payload() -> dict:
 
     # --- condition scores ---
     cond = st.session_state.condition_scores  # type: ignore[attr-defined]
+    
+    # Get property condition value with NaN safety check
+    prop_condition_val = cond["property_condition"]
+    if st.session_state.get("property_condition_na", False):
+        prop_condition_val = None
+    else:
+        # Additional safety: check for NaN and convert to None
+        try:
+            import math
+            if math.isnan(prop_condition_val):
+                prop_condition_val = None
+        except (TypeError, ValueError):
+            # If we can't check for NaN, keep the value as-is
+            pass
+    
     condition_scores = {
-        "property_condition": None if st.session_state.get("property_condition_na", False) else cond["property_condition"],
+        "property_condition": prop_condition_val,
         "quality_of_construction": None if cond["quality_of_construction"] == "N/A" else cond["quality_of_construction"],
         "improvement_condition": None if cond["improvement_condition"] == "N/A" else cond["improvement_condition"],
     }

@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python
 """Delete label documents.
 
@@ -99,7 +100,7 @@ def main() -> None:
                     "flagged": False,
                     "qa_status": "pending",
                     "qa_feedback": firestore.DELETE_FIELD,
-                    "assigned_to": None,
+                    "timestamp_labeled": None,  # Reset labeling timestamp to null (like unlabeled images)
                     "review_requested_by": firestore.DELETE_FIELD,
                     "timestamp_review_requested": firestore.DELETE_FIELD,
                     "confirmed_by": firestore.DELETE_FIELD,
@@ -139,7 +140,7 @@ def main() -> None:
                 "flagged": False,
                 "qa_status": "pending",
                 "qa_feedback": firestore.DELETE_FIELD,
-                "assigned_to": None,
+                "timestamp_labeled": None,  # Reset labeling timestamp to null (like unlabeled images)
                 "review_requested_by": firestore.DELETE_FIELD,
                 "timestamp_review_requested": firestore.DELETE_FIELD,
                 "confirmed_by": firestore.DELETE_FIELD,
