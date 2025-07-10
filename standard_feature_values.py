@@ -78,6 +78,7 @@ STANDARD_FEATURE_VALUES = {
         "arched",
         "clerestory",
         "skylight",
+        "impact",
         "none",
         "other",
     ],
@@ -105,6 +106,7 @@ STANDARD_FEATURE_VALUES = {
         "louvered",
         "arched",
         "glass",
+        "impact",
         "none",
         "other",
     ],
@@ -164,6 +166,7 @@ STANDARD_FEATURE_VALUES = {
         "open shelving",
         "beadboard",
         "louvered",
+        "wood"
         "none",
         "other",
     ],
