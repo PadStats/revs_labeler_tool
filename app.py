@@ -7,6 +7,7 @@ from io import BytesIO
 import time
 import logging
 import base64
+import math  # local import to avoid polluting global namespace
 
 import streamlit as st
 
@@ -2025,6 +2026,20 @@ def render_sticky_header(image_html: str, username: str, is_admin: bool = False,
         "<span style='font-weight:600;'>Logged in as:</span> "
         f"<span class='code-inline'>{username}</span>"
     ]
+
+    # NEW: Display Year Built if present on the task (shared across images of a property)
+    if task is not None:
+        year_built_raw = task.get("year_built")
+        # Normalize value – mark as unavailable if None/NaN/empty string
+        if year_built_raw is None or (isinstance(year_built_raw, float) and math.isnan(year_built_raw)) or (isinstance(year_built_raw, str) and not year_built_raw.strip()):
+            year_display = "Unavailable"
+        else:
+            year_display = year_built_raw
+
+        info_parts.extend([
+            "| <span style='font-weight:600;'>Year Built:</span> ",
+            f"<span class='code-inline'>{year_display}</span>",
+        ])
 
     if is_admin and task:
         info_parts.extend([
