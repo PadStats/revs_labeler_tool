@@ -1893,11 +1893,28 @@ def _build_payload() -> dict:
             selections = st.session_state.get(sel_key, [])  # type: ignore[arg-type]
             is_na = st.session_state.get(na_key, False)
             
-            # If N/A is checked, don't save anything for this category
-            if is_na:
+            # ------------------------------------------------------------------
+            # Payload logic
+            # ------------------------------------------------------------------
+            # If BOTH N/A **and** actual selections somehow co-exist (which can
+            # happen if a user unchecked the N/A box and immediately picked
+            # a feature in the same rerun cycle), we will **prioritise the
+            # selections**.  This safeguards against an inconsistent state
+            # where nothing gets saved even though the UI visibly shows
+            # features selected.
+
+            # Treat this category as N/A **only** when there are *no* feature
+            # selections.
+            if is_na and not selections:
+                # Skip saving anything for this category (stored implicitly as N/A)
                 continue
-            
-            # If no selections are made and "None" is available as an option, save "None"
+
+            # From here on we have at least one concrete selection OR we want to
+            # store an explicit "None" value for empty categories that support it.
+
+            # If no selections are made and "None" is available as an option,
+            # save "None" so downstream QA tools can distinguish between
+            # deliberate "None" and an unfinished category.
             if not selections and "None" in ui.FEATURE_TAXONOMY[loc][category]:
                 feature_list.append(f"{loc}:{category}:None")
             else:

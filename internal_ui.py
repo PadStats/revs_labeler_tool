@@ -1353,10 +1353,13 @@ def save_current_labels(image_paths: List[str], df: pd.DataFrame, user_name: str
             selections = st.session_state.get(sel_key, [])
             is_na = st.session_state.get(na_key, False)
             
-            # If N/A is checked, don't save anything for this category
-            if is_na:
+            # ------------------------------------------------------------------
+            # Payload logic (mirrors app._build_payload)
+            # ------------------------------------------------------------------
+            if is_na and not selections:
+                # Skip saving anything for this category (stored implicitly as N/A)
                 continue
-            
+
             # If no selections are made and "None" is available as an option, save "None"
             if not selections and "None" in FEATURE_TAXONOMY[loc][category]:
                 all_features.append(f"{loc}:{category}:None")

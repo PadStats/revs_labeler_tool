@@ -1408,9 +1408,13 @@ for loc, features in FEATURE_TAXONOMY.items():
     if loc in _interior_leaves and loc not in _EXCLUDED_FROM_STANDARD_FEATURES:
         for key in _FEATURE_STANDARD_KEYS:
             if key == "Window Treatments" and "Windows" not in features:
+                # Skip window treatments if the location has no windows category
                 continue
+
             if key not in features:
-                features[key] = []
+                # Populate with standard values if available, otherwise empty list
+                _std_key = _standard_key(key)
+                features[key] = _STD_FEATURE_VALUES.get(_std_key, [])
 
 # Clean up helper vars
 for _tmp in ["_get_leaf_locations", "_INTERIOR_ROOTS", "_interior_leaves", "_OUTDOOR_LIVING_LEAVES", "_FEATURE_STANDARD_KEYS", "parking_node", "node", "k", "v", "leaf", "path", "_EXCLUDED_FROM_STANDARD_FEATURES"]:
