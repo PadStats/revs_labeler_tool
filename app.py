@@ -1108,6 +1108,11 @@ def main() -> None:  # noqa: C901
         with col_c:
             if st.button("✅ Confirm", type="primary", use_container_width=True):
                 repo.confirm_labels(task["image_id"], st.session_state.username)
+                # Visual confirmation for the reviewer
+                try:
+                    st.toast("✅ Labels confirmed", icon="✅")  # Streamlit ≥1.27
+                except Exception:
+                    st.success("✅ Labels confirmed")
                 # Store last action for potential undo
                 st.session_state.last_review_action = {
                     "image_id": task["image_id"],
@@ -1119,6 +1124,11 @@ def main() -> None:  # noqa: C901
         with col_r:
             if st.button("↩️ Needs changes", use_container_width=True):
                 repo.request_revision(task["image_id"], review_target_user, st.session_state.username, fb_input)
+                # Visual confirmation for the reviewer
+                try:
+                    st.toast("↩️ Revision requested", icon="✍️")
+                except Exception:
+                    st.info("↩️ Revision requested")
                 # Store last action for potential undo
                 st.session_state.last_review_action = {
                     "image_id": task["image_id"],
@@ -1498,6 +1508,14 @@ def main() -> None:  # noqa: C901
                 st.warning(f"✍️ **Reviewer feedback:**\n\n{fb}")
             else:
                 st.info("🔄 **Reviewer has requested changes** – please update the labels.")
+
+            # Additional hint if everything already passes validation
+            try:
+                ready = ui.can_move_on()
+            except Exception:
+                ready = False
+            if ready:
+                st.success("✅ All categories complete – press **Save Labels** to resubmit.")
         elif task.get("qa_status") == "confirmed":
             st.success("✅ **Labels have been confirmed.** This image is read-only.")
             confirmed_readonly = True
