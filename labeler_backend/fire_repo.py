@@ -28,6 +28,20 @@ class FirestoreRepo(LabelRepo):
         self.users = self.db.collection("REVS_users")
 
     # ------------------------------------------------------------------
+    # Internal helper – atomic counter updates on user doc
+    # ------------------------------------------------------------------
+    def _inc_user(self, txn, user_id: str, **deltas: int) -> None:  # type: ignore[valid-type]
+        """Increment integer counters on the user document inside *txn*."""
+        if not deltas:
+            return
+        user_ref = self.users.document(user_id)
+        txn.set(user_ref, {}, merge=True)  # ensure doc exists
+        txn.update(
+            user_ref,
+            {k: firestore.Increment(v) for k, v in deltas.items() if v != 0},
+        )
+
+    # ------------------------------------------------------------------
     # Task management
     # ------------------------------------------------------------------
     def get_next_task(self, user_id: str) -> Optional[Dict]:
@@ -175,6 +189,8 @@ class FirestoreRepo(LabelRepo):
             txn.set(labels_ref, to_write, merge=True)
 
             # 2) mark image labeled & reset QA status --------------------------
+            prev_qa = img_data.get("qa_status")
+
             update_fields = {
                 "status": "labeled",
                 "timestamp_labeled": firestore.SERVER_TIMESTAMP,
@@ -185,6 +201,13 @@ class FirestoreRepo(LabelRepo):
             # We NO LONGER clear qa_feedback so reviewers can see past remarks
             txn.update(img_ref, update_fields)
 
+            # 2b) Update per-user counters only when the image enters the review pipeline
+            if prev_qa not in ("pending", "review", "confirmed"):
+                # First time entering reviewer queue
+                self._inc_user(txn, user_id,
+                               images_to_review=1,
+                               images_processed=1)
+
             # 3) user stats (unchanged) ---------------------------------------
             user_ref = self.users.document(user_id)
             txn.set(user_ref, {}, merge=True)
@@ -192,7 +215,6 @@ class FirestoreRepo(LabelRepo):
                 user_ref,
                 {
                     "last_labeled_image_id": image_id,
-                    "total_images_labeled": firestore.Increment(1),
                     "timestamp_last_labeled": firestore.SERVER_TIMESTAMP,
                 },
             )
@@ -245,16 +267,44 @@ class FirestoreRepo(LabelRepo):
     # QA helper methods (admin only)
     # ------------------------------------------------------------------
     def confirm_labels(self, image_id: str, admin_id: str) -> None:
-        """Mark *image_id* as QA-confirmed (immutable for labelers)."""
-        self.images.document(image_id).update(
+        """Mark *image_id* as QA-confirmed and update user counters."""
+
+        @firestore.transactional
+        def _txn(txn):  # type: ignore[valid-type]
+            img_ref = self.images.document(image_id)
+            img_snap = img_ref.get(transaction=txn)
+            if not img_snap.exists:
+                return
+            img_data = img_snap.to_dict() or {}
+
+            # Only proceed if not already confirmed
+            prev_qa = img_data.get("qa_status")
+            if prev_qa == "confirmed":
+                return
+
+            # Update image doc
+            txn.update(
+                img_ref,
             {
                 "qa_status": "confirmed",
                 "qa_feedback": firestore.DELETE_FIELD,
                 "assigned_to": None,
                 "confirmed_by": admin_id,
                 "timestamp_confirmed": firestore.SERVER_TIMESTAMP,
-            }
+                },
         )
+
+            # Lookup original labeler so we can update counters
+            lbl_snap = self.labels.document(image_id).get(transaction=txn)
+            if lbl_snap.exists:
+                labeler_id = lbl_snap.to_dict().get("labeled_by")
+                if labeler_id:
+                    # Decrement to_review, increment confirmed
+                    self._inc_user(txn, labeler_id,
+                                   images_confirmed=1,
+                                   images_to_review=-1)
+
+        _txn(self.db.transaction())
 
     def request_revision(self, image_id: str, labeler_id: str, admin_id: str, feedback: str | None = "") -> None:  # noqa: D401
         """Send *image_id* back for revision to *labeler_id* with optional feedback."""

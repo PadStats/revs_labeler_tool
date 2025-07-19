@@ -67,6 +67,11 @@ def init_session_state() -> None:
 
 
 def reset_session_state_to_defaults() -> None:  # shortened: same as legacy
+    # Purge any per-category feature keys from previous images
+    for key in list(st.session_state.keys()):
+        if key.startswith(("na_", "sel_")):
+            st.session_state.pop(key, None)
+
     st.session_state.location_chains = [{}]
     st.session_state.feature_labels = set()
     st.session_state.feature_na_locations = set()
@@ -318,10 +323,9 @@ def restore_feature_state():
             na_key = f"na_{loc}_{category}"
             sel_key = f"sel_{loc}_{category}"
             
-            # Restore from persistent storage only if not already in session state
+            # Initialise keys only if not already present (avoids overriding new user selections)
             persistent_na_key = f"persistent_na_{loc}_{category}"
             persistent_sel_key = f"persistent_sel_{loc}_{category}"
-            
             if na_key not in st.session_state and persistent_na_key in st.session_state.persistent_feature_state:
                 st.session_state[na_key] = st.session_state.persistent_feature_state[persistent_na_key]
             if sel_key not in st.session_state and persistent_sel_key in st.session_state.persistent_feature_state:
@@ -435,9 +439,8 @@ def restore_attribute_state():
     
     # Restore each attribute from persistent storage
     for attr in all_relevant_attrs:
+        # Restore attribute value only if not set already in current session
         persistent_key = f"persistent_{first_location_key}_{attr}"
-        
-        # Only restore if not already set and exists in persistent storage
         if attr not in st.session_state.location_attributes[first_location_key] and persistent_key in st.session_state.persistent_attribute_state:
             st.session_state.location_attributes[first_location_key][attr] = st.session_state.persistent_attribute_state[persistent_key]
 
@@ -773,10 +776,9 @@ def build_location_features(location: str):
         na_key  = f"na_{location}_{category}"
         sel_key = f"sel_{location}_{category}"
 
-        # Initialize keys if they don't exist, using persistent state as fallback
+        # Initialise keys only if not already present (avoids overriding new user selections)
         persistent_na_key = f"persistent_na_{location}_{category}"
         persistent_sel_key = f"persistent_sel_{location}_{category}"
-        
         if na_key not in st.session_state:
             st.session_state[na_key] = st.session_state.persistent_feature_state.get(persistent_na_key, False)
         if sel_key not in st.session_state:
@@ -1359,7 +1361,7 @@ def save_current_labels(image_paths: List[str], df: pd.DataFrame, user_name: str
             if is_na and not selections:
                 # Skip saving anything for this category (stored implicitly as N/A)
                 continue
-
+            
             # If no selections are made and "None" is available as an option, save "None"
             if not selections and "None" in FEATURE_TAXONOMY[loc][category]:
                 all_features.append(f"{loc}:{category}:None")

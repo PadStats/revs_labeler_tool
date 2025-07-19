@@ -240,8 +240,8 @@ def _load_env() -> None:
 
 
 def main() -> None:  # noqa: C901
+    # Slimmed-down but functional prototype using LabelRepo.
     print("DEBUG: main UI function CALLED")
-    """Slimmed-down but functional prototype using LabelRepo."""
 
     _init_state()  # Initialize our custom session state
     ui.init_session_state()
@@ -978,24 +978,39 @@ def main() -> None:  # noqa: C901
         
         st.stop()  # Don't proceed with the rest of the app
 
-    # Update the early header placeholder with the final version (includes image)
+    # Fetch user counters for header display (optional - don't break header if this fails)
+    counters = None
+    try:
+        # Pass the transaction to the get() call to ensure data consistency
+        user_doc_raw = repo.users.document(st.session_state.username).get().to_dict() or {}
+        counters = {
+            "confirmed": user_doc_raw.get("images_confirmed", 0),
+            "to_review": user_doc_raw.get("images_to_review", 0),
+            "processed": user_doc_raw.get("images_processed", 0),
+        }
+    except Exception as e:
+        # Log the error but don't break the header
+        print(f"Warning: Could not fetch user counters: {e}")
+        counters = None
+
+
     header_container.empty()
     with header_container:
-        render_sticky_header(image_html, st.session_state.username, is_admin, mode, task)
+        render_sticky_header(image_html, st.session_state.username, is_admin, mode, task, counters)
 
     # Dynamically offset subsequent content so it starts below the sticky header
     spacer_px: int
     if cache_entry.get('image_meta'):
         w, h = cache_entry['image_meta']  # type: ignore[assignment]
-        # Add extra padding for header text, fade overlay, etc.
-        base_extra = 40  # baseline for labelers
+        # Revert to a simpler spacer logic with a generous fixed height for the header text.
+        base_extra = 100  # Provides ample space for a two-line header text area.
         if is_admin:
-            base_extra += 50  # meta debug paragraph & extra margin
+            base_extra += 50  # Extra space for admin debug info
         spacer_px = _compute_display_height(w, h) + base_extra
     else:
         # Fallback if image dimensions are unavailable
         print("no image meta, using fallback")
-        spacer_px = 600
+        spacer_px = 750 # Increased fallback
     _inject_dynamic_spacer(spacer_px)
 
     # QA feedback banners will be shown in labeler mode only, positioned after navigation buttons
@@ -1005,7 +1020,9 @@ def main() -> None:  # noqa: C901
     # Restore feature state EARLY - before UI
     # ------------------------------------------------------------------
     leaves = ui.get_leaf_locations()
-    if leaves:
+    # Guard: only perform bulk feature restore once per image to avoid overriding new user edits on subsequent reruns
+    last_restored = st.session_state.get("_features_restored_image")
+    if leaves and last_restored != task["image_id"]:
         # Restore feature state when locations are available
         for loc in leaves:
             if loc not in ui.FEATURE_TAXONOMY:
@@ -1014,14 +1031,17 @@ def main() -> None:  # noqa: C901
                 na_key = f"na_{loc}_{category}"
                 sel_key = f"sel_{loc}_{category}"
                 
-                # Restore from persistent storage only if not already in session state
+                # Always restore from persistent storage to ensure we have the correct state for this image
                 persistent_na_key = f"persistent_na_{loc}_{category}"
                 persistent_sel_key = f"persistent_sel_{loc}_{category}"
                 
-                if na_key not in st.session_state and persistent_na_key in st.session_state.persistent_feature_state:
+                if persistent_na_key in st.session_state.persistent_feature_state:
                     st.session_state[na_key] = st.session_state.persistent_feature_state[persistent_na_key]
-                if sel_key not in st.session_state and persistent_sel_key in st.session_state.persistent_feature_state:
+                if persistent_sel_key in st.session_state.persistent_feature_state:
                     st.session_state[sel_key] = st.session_state.persistent_feature_state[persistent_sel_key]
+
+        # Mark restoration done for this image
+        st.session_state._features_restored_image = task["image_id"]
 
     # Restore attribute state EARLY as well (from legacy)
     ui.restore_attribute_state()
@@ -1504,12 +1524,28 @@ def main() -> None:  # noqa: C901
         # ------------------------------------------------------------------
         if task.get("qa_status") == "review":
             fb = (task.get("qa_feedback") or "").strip()
-            if fb:
-                st.warning(f"✍️ **Reviewer feedback:**\n\n{fb}")
-            else:
-                st.info("🔄 **Reviewer has requested changes** – please update the labels.")
+            ts = task.get("timestamp_review_requested")
+            ts_display = ""
+            if ts:
+                # Firestore returns a Timestamp object with .timestamp(), else assume datetime
+                try:
+                    ts_dt = datetime.fromtimestamp(ts.timestamp()) if hasattr(ts, "timestamp") else ts
+                    ts_display = ts_dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    ts_display = ""
 
-            # Additional hint if everything already passes validation
+            if fb:
+                if ts_display:
+                    st.warning(f"✍️ **Reviewer feedback** *(sent {ts_display})*:\n\n{fb}")
+                else:
+                    st.warning(f"✍️ **Reviewer feedback:**\n\n{fb}")
+            else:
+                info_txt = "🔄 **Reviewer has requested changes**"
+                if ts_display:
+                    info_txt += f" *(sent {ts_display})*"
+                st.info(f"{info_txt} – please update the labels.")
+
+            # Additional hint if everything already passes validation (unchanged logic)
             try:
                 ready = ui.can_move_on()
             except Exception:
@@ -1517,7 +1553,19 @@ def main() -> None:  # noqa: C901
             if ready:
                 st.success("✅ All categories complete – press **Save Labels** to resubmit.")
         elif task.get("qa_status") == "confirmed":
-            st.success("✅ **Labels have been confirmed.** This image is read-only.")
+            ts = task.get("timestamp_confirmed")
+            ts_display = ""
+            if ts:
+                try:
+                    ts_dt = datetime.fromtimestamp(ts.timestamp()) if hasattr(ts, "timestamp") else ts
+                    ts_display = ts_dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    ts_display = ""
+
+            if ts_display:
+                st.success(f"✅ **Labels have been confirmed** *(on {ts_display})*. This image is read-only.")
+            else:
+                st.success("✅ **Labels have been confirmed.** This image is read-only.")
             confirmed_readonly = True
 
         # Current Selections Display (from legacy)
@@ -1877,7 +1925,7 @@ def _html_image_from_b64(
         f"<div style='display:flex;justify-content:center;align-items:center;width:100%;margin:0 0 2px 0;'>"
         f"<div style='text-align:center;'>"
         f"<img src='data:image/jpeg;base64,{img_b64}' "
-        f"style='width:{disp_w}px;height:{disp_h}px;display:block;margin:0 auto;object-fit:contain;' />"
+        f"style='max-width:100%;height:auto;width:{disp_w}px;max-height:{disp_h}px;display:block;margin:0 auto;object-fit:contain;' />"
         f"{meta}"
         f"</div></div>"
     )
@@ -2011,9 +2059,6 @@ def _inject_compact_css() -> None:
         div[data-testid="stSpacer"] { height:0rem !important; }
         /* cut the extra top padding around sliders */
         div[data-testid="stSlider"] > div:first-child { padding-top:0rem; }
-        /* NEW: Pull overall content closer to the top */
-        .block-container { padding-top:0.5rem !important; padding-bottom:0.5rem !important; }
-        header[data-testid="stHeader"] { height:0rem; padding:0rem; }
         
         /* Sticky header styles */
         .sticky-header {
@@ -2024,11 +2069,26 @@ def _inject_compact_css() -> None:
             z-index: 1000;
             background: var(--background-color, #fff);
             box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-            padding: 1rem 1rem 0 1rem; /* no bottom padding */
-            margin: 0;
+            padding: 0.5rem 1rem;
+            margin: 0 0 0.5rem 0 !important;
             border-bottom: 1px solid rgba(0,0,0,0.1);
         }
-        .header-row { display:flex; align-items:baseline; gap:1rem; flex-wrap:wrap; }
+        .header-row {
+            /* Using simple block layout to stack title and info text reliably. */
+        }
+        .header-row h1 {
+            margin: 0 0 0.5rem 0 !important;
+            font-size: 1.1rem !important;
+        }
+        .header-info-text {
+            line-height: 1.4;
+            color: #31333F; /* Dark text for light mode */
+        }
+        .header-info-text .code-inline {
+            font-weight: 600;
+            color: #000000;
+            background: rgba(0,0,0,0.05);
+        }
         .sticky-header-fade {
             position: absolute;
             left: 0; right: 0; bottom: 0;
@@ -2042,6 +2102,14 @@ def _inject_compact_css() -> None:
                 background: var(--background-color, #0e1117);
                 border-bottom: 1px solid rgba(255,255,255,0.1);
             }
+            .header-info-text {
+                color: #FAFAFA; /* Light text for dark mode */
+            }
+            .header-info-text .code-inline {
+                font-weight: 600;
+                color: #FFFFFF;
+                background: rgba(255,255,255,0.15);
+            }
             .sticky-header-fade {
                 background: linear-gradient(to bottom, rgba(14,17,23,0.95) 60%, rgba(14,17,23,0));
             }
@@ -2054,7 +2122,7 @@ def _inject_compact_css() -> None:
     )
 
 
-def render_sticky_header(image_html: str, username: str, is_admin: bool = False, repo_mode: str = "", task: dict = None):
+def render_sticky_header(image_html: str, username: str, is_admin: bool = False, repo_mode: str = "", task: dict = None, counters: dict | None = None):
     """Render the title, user info, and image in a sticky header container."""
     # Build single-line info row to save vertical space
     info_parts = [
@@ -2062,7 +2130,14 @@ def render_sticky_header(image_html: str, username: str, is_admin: bool = False,
         f"<span class='code-inline'>{username}</span>"
     ]
 
-    # NEW: Display Year Built if present on the task (shared across images of a property)
+    # Add Image ID for all users if task is available
+    if task and 'image_id' in task:
+        info_parts.extend([
+            "| <span style='font-weight:600;'>Image ID:</span> ",
+            f"<span class='code-inline'>{task['image_id']}</span>",
+        ])
+
+    # Display Year Built if present on the task
     if task is not None:
         year_built_raw = task.get("year_built")
         # Normalize value – mark as unavailable if None/NaN/empty string
@@ -2075,13 +2150,22 @@ def render_sticky_header(image_html: str, username: str, is_admin: bool = False,
             "| <span style='font-weight:600;'>Year Built:</span> ",
             f"<span class='code-inline'>{year_display}</span>",
         ])
+    
+    # Display user counters
+    if counters:
+        info_parts.extend([
+            "| <span style='font-weight:600;'>Processed:</span> ",
+            f"<span class='code-inline'>{counters.get('processed', 0)}</span>",
+            "| <span style='font-weight:600;'>To Review:</span> ",
+            f"<span class='code-inline'>{counters.get('to_review', 0)}</span>",
+            "| <span style='font-weight:600;'>Confirmed:</span> ",
+            f"<span class='code-inline'>{counters.get('confirmed', 0)}</span>",
+        ])
 
     if is_admin and task:
         info_parts.extend([
             "| <span style='font-weight:600;'>Repo mode:</span> ",
             f"<span class='code-inline'>{repo_mode}</span>",
-            "| <span style='font-weight:600;'>image_id:</span> ",
-            f"<span class='code-inline'>{task['image_id']}</span>",
             "| <span style='font-weight:600;'>status:</span> ",
             f"<span class='code-inline'>{task['status']}</span>",
         ])
@@ -2092,8 +2176,8 @@ def render_sticky_header(image_html: str, username: str, is_admin: bool = False,
         f"""
         <div class="sticky-header">
             <div class="header-row">
-                <h1 style="margin:0;">🏠 Property Image Labeling Tool – prototype</h1>
-                <div style="font-size:0.85rem;">{info_html}</div>
+                <h1>🏠 Property Image Labeling Tool</h1>
+                <div class="header-info-text">{info_html}</div>
             </div>
             {image_html}
             <div class="sticky-header-fade"></div>
@@ -2101,7 +2185,6 @@ def render_sticky_header(image_html: str, username: str, is_admin: bool = False,
         """,
         unsafe_allow_html=True,
     )
-
 
 # ---------------------------------------------------------------------------
 # Helper: compute displayed image height (mirrors _html_image_from_b64 logic)
