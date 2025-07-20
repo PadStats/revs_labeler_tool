@@ -282,27 +282,33 @@ class FirestoreRepo(LabelRepo):
             if prev_qa == "confirmed":
                 return
 
-            # Update image doc
-            txn.update(
-                img_ref,
-            {
-                "qa_status": "confirmed",
-                "qa_feedback": firestore.DELETE_FIELD,
-                "assigned_to": None,
-                "confirmed_by": admin_id,
-                "timestamp_confirmed": firestore.SERVER_TIMESTAMP,
-                },
-        )
-
-            # Lookup original labeler so we can update counters
+            # Lookup original labeler FIRST – all reads must occur before any writes inside a Firestore transaction
             lbl_snap = self.labels.document(image_id).get(transaction=txn)
+            labeler_id = None
             if lbl_snap.exists:
                 labeler_id = lbl_snap.to_dict().get("labeled_by")
-                if labeler_id:
-                    # Decrement to_review, increment confirmed
-                    self._inc_user(txn, labeler_id,
-                                   images_confirmed=1,
-                                   images_to_review=-1)
+
+            # Perform writes only after all reads are done (Firestore requirement)
+            txn.update(
+                img_ref,
+                {
+                    "qa_status": "confirmed",
+                    "qa_feedback": firestore.DELETE_FIELD,
+                    "assigned_to": None,
+                    "confirmed_by": admin_id,
+                    "timestamp_confirmed": firestore.SERVER_TIMESTAMP,
+                },
+            )
+
+            # Update per-user counters if we found the original labeler
+            if labeler_id:
+                # Decrement to_review, increment confirmed
+                self._inc_user(
+                    txn,
+                    labeler_id,
+                    images_confirmed=1,
+                    images_to_review=-1,
+                )
 
         _txn(self.db.transaction())
 
