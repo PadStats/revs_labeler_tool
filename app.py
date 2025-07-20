@@ -175,6 +175,9 @@ def update_cache_with_saved_data(image_id: str, saved_labels: dict) -> None:
         cache['labels'] = saved_labels
         cache['ui_state'] = build_complete_ui_state()
         cache['last_accessed'] = time.time()
+        # Invalidate cached selection tables so they rebuild with fresh data on next render
+        for k in ('feature_table_html', 'feature_table_hash', 'attr_table_html', 'attr_table_hash', 'cond_scores_html', 'cond_scores_hash'):
+            cache.pop(k, None)
         logger.info(f"[CACHE] Updated after save for image {image_id}")
 
 
@@ -1101,7 +1104,12 @@ def main() -> None:  # noqa: C901
             if st.button("➡️ Next", use_container_width=True, disabled=not has_next, key="admin_btn_next"):
                 next_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])
                 if next_task:
+                    clear_cache()
+                    # Reset feature restoration flag to ensure features are restored for the new image
+                    st.session_state._features_restored_image = None
                     st.session_state.current_task = next_task
+                    st.session_state._last_loaded_id = None  # Force reload
+                    logger.info(f"[NAV] Set current_task to: {next_task.get('image_id')} (status: {next_task.get('status')})")
                     st.rerun()
 
         # Debug info in admin review mode
@@ -1387,6 +1395,8 @@ def main() -> None:  # noqa: C901
                          key="btn_prev"):
                 logger.info(f"[NAV] Previous button clicked")
                 clear_cache()
+                # Reset feature restoration flag to ensure features are restored for the previous image
+                st.session_state._features_restored_image = None
 
                 if prev_entry:
                     image_id = prev_entry.get("image_id")
@@ -1492,6 +1502,8 @@ def main() -> None:  # noqa: C901
                 # ------------------------------------------------------------------
                 if next_task:
                     clear_cache()
+                    # Reset feature restoration flag to ensure features are restored for the new image
+                    st.session_state._features_restored_image = None
                     st.session_state.current_task = next_task
                     st.session_state._last_loaded_id = None  # Force reload
                     logger.info(f"[NAV] Set current_task to: {next_task.get('image_id')} (status: {next_task.get('status')})")
@@ -1791,6 +1803,9 @@ def main() -> None:  # noqa: C901
                 task["qa_status"] = "pending"
                 st.session_state.current_task = task  # Update the session state with the new status
                 st.success("Saved ✔︎")
+                # Reset tracker so that feature state is re-applied on the subsequent rerun. This prevents
+                # the 'Current Selections' box from momentarily showing no features right after saving.
+                st.session_state._features_restored_image = None
                 st.rerun()
 
         # Refresh from Firestore
