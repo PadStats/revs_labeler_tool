@@ -349,7 +349,7 @@ FEATURE_TAXONOMY: dict[str, dict[str, list[str]]] = {
             "Coffered",
             "Standard Flat",
         ],
-        "Built‑Ins": [
+        "Built-Ins": [
             "Entertainment Center",
             "Bookcases",
             "Window Seat",
@@ -368,7 +368,6 @@ FEATURE_TAXONOMY: dict[str, dict[str, list[str]]] = {
         "Wall Finish": [],
         "Window Treatments": [],
         "Doors": [],
-        "Built-Ins": [],
         "HVAC Vents": [],
         "Electrical Outlets": [],
         "Misc": [],

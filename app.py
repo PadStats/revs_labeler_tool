@@ -1793,9 +1793,13 @@ def main() -> None:  # noqa: C901
         with save_col:
             if st.button("💾 Save Labels", type="primary", use_container_width=True,
                          disabled=not current_validation, key="btn_save"):
+                print(f"[APP DEBUG] Save button clicked for image {task['image_id']}")
                 payload = _build_payload()
+                print(f"[APP DEBUG] Payload built: {len(payload)} fields")
+                print(f"[APP DEBUG] Calling repo.save_labels with user: {st.session_state.username}")
                 logger.info(f"[FS] Saving labels for image {task['image_id']}")
                 repo.save_labels(task["image_id"], payload, st.session_state.username)
+                print(f"[APP DEBUG] repo.save_labels completed successfully")
                 update_cache_with_saved_data(task["image_id"], payload)
                 # Mark as labeled for downstream logic
                 task["status"] = "labeled"

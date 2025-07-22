@@ -150,6 +150,8 @@ class FirestoreRepo(LabelRepo):
         an image sent back for revision we reset qa_status to 'pending' and
         clear any previous qa_feedback.
         """
+        print(f"[FIRESTORE DEBUG] save_labels called: image={image_id}, user={user_id}")
+        
         @firestore.transactional
         def _txn(txn):  # type: ignore[valid-type]
             # Freeze check -------------------------------------------------------
@@ -189,8 +191,6 @@ class FirestoreRepo(LabelRepo):
             txn.set(labels_ref, to_write, merge=True)
 
             # 2) mark image labeled & reset QA status --------------------------
-            prev_qa = img_data.get("qa_status")
-
             update_fields = {
                 "status": "labeled",
                 "timestamp_labeled": firestore.SERVER_TIMESTAMP,
@@ -201,12 +201,15 @@ class FirestoreRepo(LabelRepo):
             # We NO LONGER clear qa_feedback so reviewers can see past remarks
             txn.update(img_ref, update_fields)
 
-            # 2b) Update per-user counters only when the image enters the review pipeline
-            if prev_qa not in ("pending", "review", "confirmed"):
-                # First time entering reviewer queue
+            # 2b) Update per-user counters: increment only for newly labeled images
+            # Increment counters the first time a labels document is created (snap.exists == False)
+            if not snap.exists:
+                print(f"[COUNTER DEBUG] First-time label for {image_id} by {user_id} -> increment counters")
                 self._inc_user(txn, user_id,
                                images_to_review=1,
                                images_processed=1)
+            else:
+                print(f"[COUNTER DEBUG] Subsequent edit for {image_id} by {user_id} -> no counter change")
 
             # 3) user stats (unchanged) ---------------------------------------
             user_ref = self.users.document(user_id)
@@ -219,7 +222,9 @@ class FirestoreRepo(LabelRepo):
                 },
             )
 
+        print(f"[FIRESTORE DEBUG] Starting transaction for image {image_id}")
         _txn(self.db.transaction())
+        print(f"[FIRESTORE DEBUG] Transaction completed for image {image_id}")
 
     # ------------------------------------------------------------------
     # Helper
