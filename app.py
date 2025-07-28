@@ -2156,6 +2156,13 @@ def render_sticky_header(image_html: str, username: str, is_admin: bool = False,
             f"<span class='code-inline'>{task['image_id']}</span>",
         ])
 
+    # Add Property ID for all users if task is available  
+    if task and task.get('property_id'):
+        info_parts.extend([
+            "| <span style='font-weight:600;'>Property ID:</span> ",
+            f"<span class='code-inline'>{task['property_id']}</span>",
+        ])
+
     # Display Year Built if present on the task
     if task is not None:
         year_built_raw = task.get("year_built")

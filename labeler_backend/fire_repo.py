@@ -88,30 +88,90 @@ class FirestoreRepo(LabelRepo):
             if docs:
                 return docs[0].to_dict()
 
-            # 2) acquire new ---------------------------------------------------
-            # Pick the oldest *unlabeled* image regardless of its qa_status.
+            # 2) acquire new with property-aware logic ---------------------------
+            user_ref = self.users.document(user_id)
+            user_doc = user_ref.get(transaction=txn)
+            user_data = user_doc.to_dict() if user_doc.exists else {}
+            
+            current_property_id = user_data.get("current_property_id")
+            
+            # 2a) Try to continue with user's current property
+            if current_property_id:
+                property_q = (
+                    self.images.where("status", "==", "unlabeled")
+                    .where("property_id", "==", current_property_id)
+                    .order_by("timestamp_uploaded")
+                    .limit(1)
+                )
+                docs = list(property_q.stream(transaction=txn))
+                if docs:
+                    # Found more images in current property
+                    doc = docs[0]
+                    expires_at = datetime.utcnow() + timedelta(minutes=_LOCK_WINDOW_MINUTES)
+                    txn.update(
+                        doc.reference,
+                        {
+                            "status": "in_progress",
+                            "assigned_to": user_id,
+                            "timestamp_assigned": firestore.SERVER_TIMESTAMP,
+                            "task_expires_at": expires_at,
+                        },
+                    )
+                    data = doc.to_dict()
+                    data.update({"status": "in_progress", "assigned_to": user_id})
+                    return data
+                else:
+                    # Current property exhausted, clear it
+                    txn.update(user_ref, {"current_property_id": None})
+            
+            # 2b) Find new available property
             new_q = (
                 self.images.where("status", "==", "unlabeled")
                 .order_by("timestamp_uploaded")
-                .limit(1)
+                .limit(10)  # Check multiple candidates for property availability
             )
-            docs = list(new_q.stream(transaction=txn))
-            if not docs:
-                return None
-            doc = docs[0]
-            expires_at = datetime.utcnow() + timedelta(minutes=_LOCK_WINDOW_MINUTES)
-            txn.update(
-                doc.reference,
-                {
-                    "status": "in_progress",
-                    "assigned_to": user_id,
-                    "timestamp_assigned": firestore.SERVER_TIMESTAMP,
-                    "task_expires_at": expires_at,
-                },
-            )
-            data = doc.to_dict()
-            data.update({"status": "in_progress", "assigned_to": user_id})
-            return data
+            candidate_docs = list(new_q.stream(transaction=txn))
+            
+            for doc in candidate_docs:
+                doc_data = doc.to_dict()
+                candidate_property_id = doc_data.get("property_id")
+                
+                if not candidate_property_id:
+                    continue  # Skip images without property_id
+                
+                # Check if property is already taken by another user
+                property_taken_q = (
+                    self.users.where("current_property_id", "==", candidate_property_id)
+                    .limit(1)
+                )
+                existing_users = list(property_taken_q.stream(transaction=txn))
+                
+                if existing_users:
+                    continue  # Property taken by another user, try next image
+                
+                # Property is available! Claim it
+                expires_at = datetime.utcnow() + timedelta(minutes=_LOCK_WINDOW_MINUTES)
+                
+                # Assign property to user
+                txn.set(user_ref, {"current_property_id": candidate_property_id}, merge=True)
+                
+                # Assign image to user
+                txn.update(
+                    doc.reference,
+                    {
+                        "status": "in_progress",
+                        "assigned_to": user_id,
+                        "timestamp_assigned": firestore.SERVER_TIMESTAMP,
+                        "task_expires_at": expires_at,
+                    },
+                )
+                
+                data = doc_data
+                data.update({"status": "in_progress", "assigned_to": user_id})
+                return data
+            
+            # No available properties found
+            return None
 
         for attempt in range(5):
             try:

@@ -103,7 +103,17 @@ def main() -> None:
         print("\n-- Dry-run complete. Use --execute to unlock.")
         return
 
+    # Collect affected users to clear their property assignments
+    affected_users = set()
+    for d in docs:
+        data = d.to_dict() or {}
+        user_id = data.get("assigned_to")
+        if user_id:
+            affected_users.add(user_id)
+
     batch = db.batch()
+    
+    # Update image documents
     for d in docs:
         ref = d.reference
         batch.update(
@@ -121,8 +131,15 @@ def main() -> None:
                 "timestamp_confirmed": firestore.DELETE_FIELD,
             },
         )
+    
+    # Clear property assignments for affected users
+    users = db.collection("REVS_users")
+    for user_id in affected_users:
+        user_ref = users.document(user_id)
+        batch.update(user_ref, {"current_property_id": None})
+    
     batch.commit()
-    print(f"\n✓ Unlocked {len(docs)} task(s).")
+    print(f"\n✓ Unlocked {len(docs)} task(s) and cleared property assignments for {len(affected_users)} user(s).")
 
 
 if __name__ == "__main__":
