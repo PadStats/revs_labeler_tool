@@ -95,49 +95,47 @@ class FirestoreRepo(LabelRepo):
             
             current_property_id = user_data.get("current_property_id")
             
-            # 2a) Try to continue with user's current property
-            if current_property_id:
-                property_q = (
-                    self.images.where("status", "==", "unlabeled")
-                    .where("property_id", "==", current_property_id)
-                    .order_by("timestamp_uploaded")
-                    .limit(1)
-                )
-                docs = list(property_q.stream(transaction=txn))
-                if docs:
-                    # Found more images in current property
-                    doc = docs[0]
-                    expires_at = datetime.utcnow() + timedelta(minutes=_LOCK_WINDOW_MINUTES)
-                    txn.update(
-                        doc.reference,
-                        {
-                            "status": "in_progress",
-                            "assigned_to": user_id,
-                            "timestamp_assigned": firestore.SERVER_TIMESTAMP,
-                            "task_expires_at": expires_at,
-                        },
-                    )
-                    data = doc.to_dict()
-                    data.update({"status": "in_progress", "assigned_to": user_id})
-                    return data
-                else:
-                    # Current property exhausted, clear it
-                    txn.update(user_ref, {"current_property_id": None})
-            
-            # 2b) Find new available property
+            # Get all candidate unlabeled images upfront (before any writes)
             new_q = (
                 self.images.where("status", "==", "unlabeled")
                 .order_by("timestamp_uploaded")
-                .limit(10)  # Check multiple candidates for property availability
+                .limit(20)  # Get more candidates to check availability
             )
             candidate_docs = list(new_q.stream(transaction=txn))
             
+            # 2a) Try to continue with user's current property first
+            if current_property_id:
+                for doc in candidate_docs:
+                    doc_data = doc.to_dict()
+                    if doc_data.get("property_id") == current_property_id:
+                        # Found image in user's current property
+                        expires_at = datetime.utcnow() + timedelta(minutes=_LOCK_WINDOW_MINUTES)
+                        txn.update(
+                            doc.reference,
+                            {
+                                "status": "in_progress",
+                                "assigned_to": user_id,
+                                "timestamp_assigned": firestore.SERVER_TIMESTAMP,
+                                "task_expires_at": expires_at,
+                            },
+                        )
+                        data = doc_data
+                        data.update({"status": "in_progress", "assigned_to": user_id})
+                        return data
+                
+                # No images found in current property, will clear it below
+            
+            # 2b) Find new available property
             for doc in candidate_docs:
                 doc_data = doc.to_dict()
                 candidate_property_id = doc_data.get("property_id")
                 
                 if not candidate_property_id:
                     continue  # Skip images without property_id
+                
+                # Skip if this is the user's current exhausted property
+                if candidate_property_id == current_property_id:
+                    continue  # Already checked above
                 
                 # Check if property is already taken by another user
                 property_taken_q = (
@@ -152,7 +150,7 @@ class FirestoreRepo(LabelRepo):
                 # Property is available! Claim it
                 expires_at = datetime.utcnow() + timedelta(minutes=_LOCK_WINDOW_MINUTES)
                 
-                # Assign property to user
+                # Update user's property (clear old, set new)
                 txn.set(user_ref, {"current_property_id": candidate_property_id}, merge=True)
                 
                 # Assign image to user
@@ -170,7 +168,10 @@ class FirestoreRepo(LabelRepo):
                 data.update({"status": "in_progress", "assigned_to": user_id})
                 return data
             
-            # No available properties found
+            # No available properties found - clear user's exhausted property if any
+            if current_property_id:
+                txn.update(user_ref, {"current_property_id": None})
+            
             return None
 
         for attempt in range(5):
