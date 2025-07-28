@@ -133,6 +133,7 @@ STANDARD_FEATURE_VALUES = {
         "radiant floor",
         "mini split (wall cassette)",
         "ceiling cassette",
+        "window unit",
         "none",
         "other",
     ],
