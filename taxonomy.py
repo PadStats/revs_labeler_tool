@@ -742,6 +742,7 @@ FEATURE_TAXONOMY: dict[str, dict[str, list[str]]] = {
         "Material": ["Concrete", "Asphalt", "Paver", "Gravel"],
         "Condition": ["Excellent", "Good", "Cracked"],
         "Parking Capacity": ["Single", "Double", "Multiple"],
+        "Lighting Fixtures": [],
     },
     "Pool Area": {
         "Pool Type": ["In‑Ground", "Above‑Ground"],
