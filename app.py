@@ -60,6 +60,9 @@ def _init_state() -> None:
             'cached_at': None,
             'last_accessed': None,
             'resolved_url': None,  # cached resolved Backblaze URL
+            'resolved_url_ts': None,  # timestamp for resolver TTL
+            'display_mode': None,   # 'bytes' or 'simple'
+            'simple_url': None,     # URL used for simple mode
             'image_bytes': None,   # raw bytes of downloaded image
             'image_meta': None     # (width, height)
         }
@@ -89,6 +92,9 @@ def cache_task_data(image_id: str, task_data: dict, labels: dict, ui_state: dict
         'cached_at': time.time(),
         'last_accessed': time.time(),
         'resolved_url': None,  # cached resolved Backblaze URL
+        'resolved_url_ts': None,  # timestamp for resolver TTL
+        'display_mode': None,   # 'bytes' or 'simple'
+        'simple_url': None,     # URL used for simple mode
         'image_bytes': None,   # raw bytes of downloaded image
         'image_meta': None     # (width, height)
     }
@@ -127,6 +133,9 @@ def clear_cache() -> None:
         'cached_at': None,
         'last_accessed': None,
         'resolved_url': None,  # cached resolved Backblaze URL
+        'resolved_url_ts': None,  # timestamp for resolver TTL
+        'display_mode': None,   # 'bytes' or 'simple'
+        'simple_url': None,     # URL used for simple mode
         'image_bytes': None,   # raw bytes of downloaded image
         'image_meta': None     # (width, height)
     }
@@ -875,16 +884,24 @@ def main() -> None:  # noqa: C901
     # Resolve image URL (cached)
     # ------------------------------------------------------------------
     resolved_url: str | None = None
+    resolved_ttl_seconds = 3600  # 1 hour TTL for signed URLs
     if cache_entry.get('current_image_id') == task['image_id']:
-        resolved_url = cache_entry.get('resolved_url')
+        # Only reuse cached resolved URL if still fresh
+        ts = cache_entry.get('resolved_url_ts') or 0
+        if ts and (time.time() - ts) < resolved_ttl_seconds:
+            resolved_url = cache_entry.get('resolved_url')
 
     if resolved_url is None:
         try:
             resolved_url = repo.get_image_url(task)
             cache_entry['resolved_url'] = resolved_url
+            cache_entry['resolved_url_ts'] = time.time()
             logger.info(f"[CACHE] Stored resolved URL for {task['image_id']}")
         except Exception as e:
             logger.warning(f"API resolver failed: {e}")
+            # Invalidate any stale cached value to force fallback
+            cache_entry['resolved_url'] = None
+            cache_entry['resolved_url_ts'] = None
 
     # Candidate sources (resolved URL first, fallback to raw image_url)
     image_sources: list[tuple[str, str]] = []
@@ -904,16 +921,26 @@ def main() -> None:  # noqa: C901
         and cache_entry.get('image_b64')
         and cache_entry.get('image_meta')
     ):
-        b64: str = cache_entry['image_b64']  # type: ignore[assignment]
-        w, h = cache_entry['image_meta']
-        logger.info("[PERF] base64 path used")
-        image_html = _html_image_from_b64(b64, w, h, "Cache", task['image_id'], admin=is_admin)
-        image_displayed = True
+        if cache_entry.get('display_mode') == 'simple' and cache_entry.get('simple_url'):
+            # If last time we had to fall back to simple display, keep using it to avoid re-downloading
+            try:
+                st.image(cache_entry['simple_url'], use_container_width=True)
+                image_html = "<div style='text-align:center;padding:1rem;'><p>Image loaded (simple mode, cache)</p></div>"
+                image_displayed = True
+            except Exception:
+                # If simple mode now fails, drop through to bytes path below
+                pass
+        if not image_displayed:
+            b64: str = cache_entry['image_b64']  # type: ignore[assignment]
+            w, h = cache_entry['image_meta']
+            logger.info("[PERF] base64 path used")
+            image_html = _html_image_from_b64(b64, w, h, "Cache", task['image_id'], admin=is_admin)
+            image_displayed = True
     else:
         # Try each image source and cache the first successful bytes download
         for source_name, url in image_sources:
             try:
-                response = requests.get(url, timeout=2)
+                response = requests.get(url, timeout=10)
                 response.raise_for_status()
                 content_type = response.headers.get('content-type', '')
                 if not content_type.startswith('image/'):
@@ -931,20 +958,28 @@ def main() -> None:  # noqa: C901
                 cache_entry['image_bytes'] = img_bytes
                 cache_entry['image_meta'] = img.size
                 cache_entry['image_b64'] = img_b64
+                cache_entry['display_mode'] = 'bytes'
+                cache_entry['simple_url'] = None
                 logger.info(f"[CACHE] Stored image bytes for {task['image_id']}")
                 break
             except requests.HTTPError as http_err:
                 st.warning(f"HTTP error for {source_name}: {http_err}")
                 continue  # Try next source
             except Exception as e:
+                # If API Endpoint failed, invalidate cached resolved_url to avoid reusing bad link
+                if source_name == "API Endpoint":
+                    cache_entry['resolved_url'] = None
+                    cache_entry['resolved_url_ts'] = None
                 st.warning(f"⚠️ Responsive sizing failed for {source_name}, trying simple display: {e}")
                 try:
-                    # For simple mode, we'll use st.image but need to handle it differently
+                    # Use Streamlit's native image renderer as a fallback (browser handles sizing)
                     st.image(url, use_container_width=True)
                     st.success(f"✅ Successfully displayed image via {source_name} (simple mode)")
                     image_displayed = True
                     # Create a placeholder HTML for the sticky header
                     image_html = f"<div style='text-align:center;padding:1rem;'><p>Image loaded via {source_name} (simple mode)</p></div>"
+                    cache_entry['display_mode'] = 'simple'
+                    cache_entry['simple_url'] = url
                     break
                 except Exception as e:
                     st.error(f"❌ Failed to display image via {source_name}: {e}")
@@ -957,7 +992,7 @@ def main() -> None:  # noqa: C901
         for source_name, url in image_sources:
             st.markdown(f"- {source_name}: `{url}`")
         
-        col1, col2 = st.columns([1, 1])
+        col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
             if st.button("🔄 Retry Image Loading", use_container_width=True):
                 st.rerun()
@@ -978,6 +1013,32 @@ def main() -> None:  # noqa: C901
                 clear_cache()
                 st.session_state.current_task = None  # triggers get_next_task on rerun
                 st.rerun()
+        with col3:
+            # Allow navigating back even when the current image cannot be displayed
+            # by jumping to the most recent labeled image in history, if available.
+            try:
+                prev_hist = repo.get_user_history(st.session_state.username, limit=200)
+                has_prev = bool(prev_hist)
+            except Exception:
+                has_prev = False
+            if st.button("⬅️ Previous", use_container_width=True, disabled=not has_prev):
+                try:
+                    if prev_hist:
+                        prev_entry = prev_hist[0]
+                        image_id = prev_entry.get("image_id")
+                        if image_id:
+                            try:
+                                img_doc = repo.get_image_doc(image_id)
+                            except AttributeError:
+                                img_doc = None
+                            if not img_doc:
+                                img_doc = {"image_id": image_id, "status": "labeled", "bb_url": prev_entry.get("bb_url", "")}
+                            st.session_state.current_task = {**prev_entry, **img_doc}
+                            st.session_state._last_loaded_id = None
+                            clear_cache()
+                            st.rerun()
+                except Exception as e:
+                    st.warning(f"Could not load previous image: {e}")
         
         st.stop()  # Don't proceed with the rest of the app
 

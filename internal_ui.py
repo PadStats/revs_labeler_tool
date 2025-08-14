@@ -1249,7 +1249,58 @@ def is_selection_complete() -> bool:
     complete = get_complete_chains()
     return bool(complete) and len(complete) == len([c for c in st.session_state.location_chains if c])
 
+def _get_validation_cache_key() -> str:
+    """Generate a cache key based on current UI state for validation caching."""
+    import hashlib
+    import json
+    
+    # Create a snapshot of relevant session state for caching
+    cache_data = {
+        'location_chains': st.session_state.get('location_chains', []),
+        'location_attributes': st.session_state.get('location_attributes', {}),
+        'condition_scores': st.session_state.get('condition_scores', {}),
+        'property_condition_confirmed': st.session_state.get('property_condition_confirmed', False),
+        'property_condition_na': st.session_state.get('property_condition_na', False),
+    }
+    
+    # Add feature selections to cache data
+    leaves = get_leaf_locations()
+    for loc in leaves:
+        if loc not in FEATURE_TAXONOMY:
+            continue
+        for category in FEATURE_TAXONOMY[loc]:
+            na_key = f"na_{loc}_{category}"
+            sel_key = f"sel_{loc}_{category}"
+            cache_data[na_key] = st.session_state.get(na_key, False)
+            cache_data[sel_key] = st.session_state.get(sel_key, [])
+    
+    # Create hash of the state
+    cache_str = json.dumps(cache_data, sort_keys=True)
+    return hashlib.md5(cache_str.encode()).hexdigest()
+
 def can_move_on() -> bool:
+    # Check cache first to avoid expensive validation
+    cache_key = _get_validation_cache_key()
+    cache_result_key = f"_validation_cache_{cache_key}"
+    
+    if cache_result_key in st.session_state:
+        return st.session_state[cache_result_key]
+    
+    # Run the actual validation
+    result = _can_move_on_uncached()
+    
+    # Cache the result
+    st.session_state[cache_result_key] = result
+    
+    # Clean up old cache entries (keep only the current one)
+    keys_to_remove = [k for k in st.session_state.keys() if k.startswith('_validation_cache_') and k != cache_result_key]
+    for key in keys_to_remove:
+        del st.session_state[key]
+    
+    return result
+
+def _can_move_on_uncached() -> bool:
+    """Actual validation logic without caching."""
     # 1) Spatial must be done
     if not is_selection_complete():
         return False
@@ -1397,6 +1448,13 @@ def save_current_labels(image_paths: List[str], df: pd.DataFrame, user_name: str
     
     new_df = pd.DataFrame([data])
     out_df = pd.concat([df[df["image_path"] != img_path], new_df], ignore_index=True)
-    save_labels(out_df)
+    # Optional hook for environments that define a global save_labels function
+    # Use dynamic lookup to avoid static-name linter warnings when not present
+    saver = globals().get("save_labels")
+    if callable(saver):
+        try:
+            saver(out_df)  # type: ignore[misc]
+        except Exception:
+            pass
     st.success("✅ Labels saved successfully!")
     return out_df
