@@ -914,23 +914,19 @@ def main() -> None:  # noqa: C901
         st.warning("⚠️ No raw image_url available in task")
 
     # ------------------------------------------------------------------
-    # Use cached image bytes if present
+    # Reuse cached display if present (URL mode preferred for performance)
     # ------------------------------------------------------------------
-    if (
-        cache_entry.get('current_image_id') == task['image_id']
-        and cache_entry.get('image_b64')
-        and cache_entry.get('image_meta')
-    ):
-        if cache_entry.get('display_mode') == 'simple' and cache_entry.get('simple_url'):
-            # If last time we had to fall back to simple display, keep using it to avoid re-downloading
-            try:
-                st.image(cache_entry['simple_url'], use_container_width=True)
-                image_html = "<div style='text-align:center;padding:1rem;'><p>Image loaded (simple mode, cache)</p></div>"
-                image_displayed = True
-            except Exception:
-                # If simple mode now fails, drop through to bytes path below
-                pass
-        if not image_displayed:
+    has_cached_url = (
+        cache_entry.get('display_mode') == 'url' and bool(cache_entry.get('simple_url'))
+    )
+    has_cached_bytes = (
+        cache_entry.get('display_mode') == 'bytes' and bool(cache_entry.get('image_b64')) and bool(cache_entry.get('image_meta'))
+    )
+    if cache_entry.get('current_image_id') == task['image_id'] and (has_cached_url or has_cached_bytes):
+        if has_cached_url:
+            image_html = _html_image_from_url(cache_entry['simple_url'], "Cache", task['image_id'], admin=is_admin)
+            image_displayed = True
+        else:
             b64: str = cache_entry['image_b64']  # type: ignore[assignment]
             w, h = cache_entry['image_meta']
             logger.info("[PERF] base64 path used")
@@ -939,50 +935,45 @@ def main() -> None:  # noqa: C901
     else:
         # Try each image source and cache the first successful bytes download
         for source_name, url in image_sources:
+            # 1) Fast path: render by URL so the browser fetches and caches bytes
             try:
-                response = requests.get(url, timeout=10)
-                response.raise_for_status()
-                content_type = response.headers.get('content-type', '')
-                if not content_type.startswith('image/'):
-                    raise ValueError(f"URL returned non-image content: {content_type}")
-                img_bytes = response.content
-                img = Image.open(BytesIO(img_bytes))
-
-                # Pre-compute & store heavy transforms once
-                img_b64 = base64.b64encode(img_bytes).decode()
-
-                image_html = _html_image_from_b64(img_b64, img.size[0], img.size[1], source_name, task['image_id'], admin=is_admin)
+                image_html = _html_image_from_url(url, source_name, task['image_id'], admin=is_admin)
                 image_displayed = True
 
-                # Cache bytes & meta for future reruns
-                cache_entry['image_bytes'] = img_bytes
-                cache_entry['image_meta'] = img.size
-                cache_entry['image_b64'] = img_b64
-                cache_entry['display_mode'] = 'bytes'
-                cache_entry['simple_url'] = None
-                logger.info(f"[CACHE] Stored image bytes for {task['image_id']}")
-                break
-            except requests.HTTPError as http_err:
-                st.warning(f"HTTP error for {source_name}: {http_err}")
-                continue  # Try next source
-            except Exception as e:
-                # If API Endpoint failed, invalidate cached resolved_url to avoid reusing bad link
+                # Cache URL mode for future reruns
+                cache_entry['display_mode'] = 'url'
+                cache_entry['simple_url'] = url
+                # Keep resolved_url timestamp if this was API Endpoint
                 if source_name == "API Endpoint":
-                    cache_entry['resolved_url'] = None
-                    cache_entry['resolved_url_ts'] = None
-                st.warning(f"⚠️ Responsive sizing failed for {source_name}, trying simple display: {e}")
+                    cache_entry['resolved_url'] = url
+                    cache_entry['resolved_url_ts'] = cache_entry.get('resolved_url_ts') or time.time()
+                break
+            except Exception as e:
+                # 2) Fallback: attempt server-side fetch/bytes path (rare)
                 try:
-                    # Use Streamlit's native image renderer as a fallback (browser handles sizing)
-                    st.image(url, use_container_width=True)
-                    st.success(f"✅ Successfully displayed image via {source_name} (simple mode)")
+                    response = requests.get(url, timeout=10)
+                    response.raise_for_status()
+                    content_type = response.headers.get('content-type', '')
+                    if not content_type.startswith('image/'):
+                        raise ValueError(f"URL returned non-image content: {content_type}")
+                    img_bytes = response.content
+                    img = Image.open(BytesIO(img_bytes))
+                    img_b64 = base64.b64encode(img_bytes).decode()
+                    image_html = _html_image_from_b64(img_b64, img.size[0], img.size[1], source_name, task['image_id'], admin=is_admin)
                     image_displayed = True
-                    # Create a placeholder HTML for the sticky header
-                    image_html = f"<div style='text-align:center;padding:1rem;'><p>Image loaded via {source_name} (simple mode)</p></div>"
-                    cache_entry['display_mode'] = 'simple'
-                    cache_entry['simple_url'] = url
+                    cache_entry['image_bytes'] = img_bytes
+                    cache_entry['image_meta'] = img.size
+                    cache_entry['image_b64'] = img_b64
+                    cache_entry['display_mode'] = 'bytes'
+                    cache_entry['simple_url'] = None
+                    logger.info(f"[CACHE] Stored image bytes for {task['image_id']}")
                     break
-                except Exception as e:
-                    st.error(f"❌ Failed to display image via {source_name}: {e}")
+                except Exception as inner_e:
+                    # Invalidate API Endpoint cache if that was the source
+                    if source_name == "API Endpoint":
+                        cache_entry['resolved_url'] = None
+                        cache_entry['resolved_url_ts'] = None
+                    st.warning(f"⚠️ Failed to display via {source_name}: {e or inner_e}")
                     continue
     
     # If no image sources worked, allow user to skip
@@ -1058,9 +1049,35 @@ def main() -> None:  # noqa: C901
         counters = None
 
 
+    # Compute image progress index based on total processed counter (newest = total)
+    progress_current = None
+    progress_total = None
+    try:
+        if counters and task:
+            progress_total = int(counters.get("processed", 0))
+            if task.get("status") == "labeled" and progress_total > 0:
+                # Fetch full labeled history to determine absolute position
+                try:
+                    hist = repo.get_user_history(st.session_state.username, limit=max(1, progress_total))
+                    current_idx = None
+                    for idx, entry in enumerate(hist):
+                        if entry.get("image_id") == task.get("image_id"):
+                            current_idx = idx
+                            break
+                    if current_idx is not None:
+                        # newest (idx 0) => progress_current = progress_total
+                        progress_current = progress_total - current_idx
+                except Exception:
+                    pass
+            elif task.get("status") != "labeled" and progress_total is not None:
+                # When labeling a new image, show next number as a hint
+                progress_current = progress_total + 1
+    except Exception:
+        pass
+
     header_container.empty()
     with header_container:
-        render_sticky_header(image_html, st.session_state.username, is_admin, mode, task, counters)
+        render_sticky_header(image_html, st.session_state.username, is_admin, mode, task, counters, progress_current, progress_total)
 
     # Dynamically offset subsequent content so it starts below the sticky header
     spacer_px: int
@@ -2011,6 +2028,39 @@ def _html_image_from_b64(
     )
 
 
+# ---------------------------------------------------------------------------
+# Helper: build centered HTML for direct URL images (browser fetches bytes)
+# ---------------------------------------------------------------------------
+
+
+def _html_image_from_url(
+    img_url: str,
+    source: str,
+    image_id: str,
+    *,
+    admin: bool = False,
+) -> str:
+    """Return HTML snippet that displays an image by URL directly in the browser.
+
+    This avoids server-side downloads, Pillow decoding and base64 encoding, which
+    are slow with large images and cause long rerun times. The browser handles
+    fetching, caching and sizing.
+    """
+
+    TARGET_H: int = 500
+
+    meta = (
+        f"<p style='text-align:center;margin-top:10px;color:#666;'>{image_id} (via {source})</p>"
+    ) if admin else ""
+
+    return (
+        f"<div style='display:flex;justify-content:center;align-items:center;width:100%;margin:0 0 2px 0;'>"
+        f"<div style='text-align:center;'>"
+        f"<img src='{img_url}' style='max-width:100%;height:auto;max-height:{TARGET_H}px;display:block;margin:0 auto;object-fit:contain;' />"
+        f"{meta}"
+        f"</div></div>"
+    )
+
 # Add global build payload helper before main definition
 def _build_payload() -> dict:
     """Collect current UI selections into a Firestore-ready payload.
@@ -2202,7 +2252,7 @@ def _inject_compact_css() -> None:
     )
 
 
-def render_sticky_header(image_html: str, username: str, is_admin: bool = False, repo_mode: str = "", task: dict = None, counters: dict | None = None):
+def render_sticky_header(image_html: str, username: str, is_admin: bool = False, repo_mode: str = "", task: dict = None, counters: dict | None = None, progress_current: int | None = None, progress_total: int | None = None):
     """Render the title, user info, and image in a sticky header container."""
     # Build single-line info row to save vertical space
     info_parts = [
@@ -2223,6 +2273,19 @@ def render_sticky_header(image_html: str, username: str, is_admin: bool = False,
             "| <span style='font-weight:600;'>Property ID:</span> ",
             f"<span class='code-inline'>{task['property_id']}</span>",
         ])
+
+    # Process progress tracker: X / total_processed (newest = total)
+    if task and progress_total:
+        try:
+            if progress_current is None:
+                # Fallback to 1 of total if we can't compute
+                progress_current = 1
+            info_parts.extend([
+                "| <span style='font-weight:600;'>Image:</span> ",
+                f"<span class='code-inline'>{progress_current} / {progress_total}</span>",
+            ])
+        except Exception:
+            pass
 
     # Display Year Built if present on the task
     if task is not None:
