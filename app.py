@@ -1913,37 +1913,78 @@ def main() -> None:  # noqa: C901
         st.subheader("📝 Additional Information")
         st.session_state.notes = st.text_area("Notes", value=st.session_state.notes, height=80)
 
-        # Go-to-page navigation is an admin-only feature
+        # Go-to-image navigation available to all users, integrated with progress counter
         final_validation = ui.can_move_on()
 
-        if is_admin:
-            go_left, go_mid, go_right = st.columns([3, 1, 3], gap="small")
-            with go_mid:
-                goto = st.number_input(
-                    "Go to page",
-                    min_value=1,
-                    max_value=1000,  # Reasonable upper bound
-                    value=1,
-                    step=1,
-                    key="goto_input_bottom",
-                    label_visibility="collapsed"
-                )
-                if st.button(
-                    "🔎 Go",
-                    use_container_width=True,
-                    disabled=not final_validation,
-                    key="btn_goto_bottom",
-                ):
-                    # Save current task first
-                    payload = _build_payload()
-                    logger.info(f"[FS] Saving labels for image {task['image_id']} (Go)")
-                    repo.save_labels(task["image_id"], payload, st.session_state.username)
-                    # Update cache with saved data
-                    update_cache_with_saved_data(task["image_id"], payload)
-                    # Clear cache and load next image
-                    clear_cache()
-                    st.session_state.current_task = None  # triggers get_next_task on rerun
-                    st.rerun()
+        go_left, go_mid, go_right = st.columns([3, 1, 3], gap="small")
+        with go_mid:
+            # Determine bounds from user counters
+            min_val = 1
+            max_val = max(1, int(progress_total)) if progress_total else 1
+            default_val_raw = int(progress_current) if progress_current else min_val
+            # Clamp default within [min_val, max_val] to avoid Streamlit errors
+            default_val = min(max_val, max(min_val, default_val_raw))
+            goto = st.number_input(
+                "Go to image #",
+                min_value=min_val,
+                max_value=max_val,
+                value=default_val,
+                step=1,
+                key="goto_input_bottom",
+                label_visibility="collapsed"
+            )
+            if st.button(
+                "🔎 Go",
+                use_container_width=True,
+                disabled=False,
+                key="btn_goto_bottom",
+            ):
+                try:
+                    # Save current task only when validation passes; otherwise skip saving
+                    if final_validation:
+                        payload = _build_payload()
+                        logger.info(f"[FS] Saving labels for image {task['image_id']} (Go)")
+                        repo.save_labels(task["image_id"], payload, st.session_state.username)
+                        update_cache_with_saved_data(task["image_id"], payload)
+                    else:
+                        logger.info("[NAV] Go pressed without valid form; skipping save before jump")
+
+                    # Validate bounds and load target from history
+                    if not progress_total:
+                        st.warning("No image history available to jump to.")
+                    else:
+                        target_number = int(goto)
+                        if target_number < 1 or target_number > int(progress_total):
+                            st.warning("Invalid image number.")
+                        else:
+                            # History is newest-first; map N to index
+                            hist = repo.get_user_history(st.session_state.username, limit=int(progress_total))
+                            idx = int(progress_total) - target_number
+                            if 0 <= idx < len(hist):
+                                entry = hist[idx]
+                                image_id = entry.get("image_id")
+                                if image_id:
+                                    try:
+                                        img_doc = repo.get_image_doc(image_id)
+                                    except AttributeError:
+                                        img_doc = None
+                                    if not img_doc:
+                                        img_doc = {
+                                            "image_id": image_id,
+                                            "status": "labeled",
+                                            "bb_url": entry.get("bb_url", ""),
+                                        }
+                                    merged_task = {**entry, **img_doc}
+                                    clear_cache()
+                                    st.session_state._features_restored_image = None
+                                    st.session_state.current_task = merged_task
+                                    st.session_state._last_loaded_id = None
+                                    st.rerun()
+                            else:
+                                st.warning("Invalid image number.")
+                except Exception as e:
+                    logger.error(f"[NAV] Go-to failed: {e}")
+                    st.warning("Could not jump to the requested image.")
 
     # Admin-only debug panels ---------------------------------------------------
     if is_admin:
