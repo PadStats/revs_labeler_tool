@@ -289,10 +289,12 @@ def main() -> None:  # noqa: C901
     header_container = st.container()
 
     # Determine current user's role
-    is_admin = st.session_state.get("role") == "admin"
+    role = st.session_state.get("role")
+    is_admin = role == "admin"
+    is_qa_editor = role == "qa_editor"
 
     # ------------------------------------------------------------------
-    # Admin controls (sidebar) – allow switching between Label & Review
+    # Review/editor controls (sidebar) – admin: Review; qa_editor: Editor
     # ------------------------------------------------------------------
     admin_mode: str = st.session_state.get("admin_mode", "Label")
     review_target_user: str = st.session_state.get("review_target_user", "")
@@ -302,14 +304,20 @@ def main() -> None:  # noqa: C901
             admin_mode = st.radio("Mode", ["Label", "Review"], key="admin_mode")
             if admin_mode == "Review":
                 review_target_user = st.text_input("Labeler username", key="review_target_user")
+    elif is_qa_editor:
+        with st.sidebar:
+            st.markdown("### QA Editor Controls")
+            admin_mode = st.radio("Mode", ["Label", "Editor"], key="admin_mode")
+            if admin_mode == "Editor":
+                review_target_user = st.text_input("Labeler username", key="review_target_user")
     else:
-        # force defaults for non-admins
         admin_mode, review_target_user = "Label", ""
 
     is_admin_review = is_admin and admin_mode == "Review" and bool(review_target_user)
+    is_editor_review = is_qa_editor and admin_mode == "Editor" and bool(review_target_user)
 
     # Handle mode switch: if admin switches from Review to Label, reset state and load labeler image
-    if is_admin and admin_mode == "Label" and st.session_state.get("_last_review_user"):
+    if (is_admin or is_qa_editor) and admin_mode == "Label" and st.session_state.get("_last_review_user"):
         st.session_state._last_review_user = None
         st.session_state.current_task = None
         # Reset all session state relevant to labeling UI
@@ -365,6 +373,20 @@ def main() -> None:  # noqa: C901
                 st.session_state._last_review_user = review_target_user
                 if task is None:
                     st.success(f"🎉 No more images to review for {review_target_user}.")
+                    return
+            else:
+                task = st.session_state.current_task
+        # --- QA editor path ---------------------------------------------------
+        elif is_editor_review:
+            if (
+                st.session_state.get("_last_review_user") != review_target_user
+                or st.session_state.current_task is None
+            ):
+                task = repo.get_next_editor_task(review_target_user)
+                st.session_state.current_task = task
+                st.session_state._last_review_user = review_target_user
+                if task is None:
+                    st.success(f"🎉 No editable images for {review_target_user}.")
                     return
             else:
                 task = st.session_state.current_task
@@ -1036,8 +1058,10 @@ def main() -> None:  # noqa: C901
     # Fetch user counters for header display (optional - don't break header if this fails)
     counters = None
     try:
+        # In admin/qa-editor review modes, show counters for the target labeler
+        counters_user = review_target_user if (is_admin_review or is_editor_review) else st.session_state.username
         # Pass the transaction to the get() call to ensure data consistency
-        user_doc_raw = repo.users.document(st.session_state.username).get().to_dict() or {}
+        user_doc_raw = repo.users.document(counters_user).get().to_dict() or {}
         counters = {
             "confirmed": user_doc_raw.get("images_confirmed", 0),
             "to_review": user_doc_raw.get("images_to_review", 0),
@@ -1058,7 +1082,8 @@ def main() -> None:  # noqa: C901
             if task.get("status") == "labeled" and progress_total > 0:
                 # Fetch full labeled history to determine absolute position
                 try:
-                    hist = repo.get_user_history(st.session_state.username, limit=max(1, progress_total))
+                    history_user = review_target_user if (is_admin_review or is_editor_review) else st.session_state.username
+                    hist = repo.get_user_history(history_user, limit=max(1, progress_total))
                     current_idx = None
                     for idx, entry in enumerate(hist):
                         if entry.get("image_id") == task.get("image_id"):
@@ -1397,6 +1422,151 @@ def main() -> None:  # noqa: C901
             st.markdown(f"**Labeler Notes:** {st.session_state.notes}")
         else:
             st.markdown("*No notes provided*")
+
+    elif is_editor_review:
+        # ------------------------------------------------------------------
+        # QA Editor UI (editable review for pending/review, excludes confirmed)
+        # ------------------------------------------------------------------
+        # Navigation + editor actions (Save/Refresh/Confirm) under the image
+        nav_left, nav_prev, nav_next, nav_right = st.columns([2.5, 1, 1, 3.5], gap="small")
+
+        has_prev = False
+        has_next = False
+        try:
+            prev_check = repo.get_prev_editor_task(review_target_user, before_image_id=task["image_id"]) if task else None
+            has_prev = prev_check is not None
+            next_check = repo.get_next_editor_task(review_target_user, after_image_id=task["image_id"]) if task else None
+            has_next = next_check is not None
+        except Exception as e:
+            logger.error(f"[EDITOR NAV] Error checking navigation availability: {e}")
+            has_prev = False
+            has_next = False
+
+        with nav_prev:
+            if st.button("⬅️ Previous", use_container_width=True, disabled=not has_prev, key="editor_btn_prev"):
+                prev_task = repo.get_prev_editor_task(review_target_user, before_image_id=task["image_id"]) if task else None
+                if prev_task:
+                    clear_cache()
+                    st.session_state._features_restored_image = None
+                    st.session_state.current_task = prev_task
+                    st.session_state._last_loaded_id = None
+                    st.rerun()
+
+        with nav_next:
+            if st.button("➡️ Next", use_container_width=True, disabled=not has_next, key="editor_btn_next"):
+                next_task = repo.get_next_editor_task(review_target_user, after_image_id=task["image_id"]) if task else None
+                if next_task:
+                    clear_cache()
+                    st.session_state._features_restored_image = None
+                    st.session_state.current_task = next_task
+                    st.session_state._last_loaded_id = None
+                    st.rerun()
+
+        # Editor action buttons (Save / Refresh / Confirm) on the right side of the row
+        with nav_right:
+            c1, c2, c3 = st.columns([1, 1, 1], gap="small")
+            editor_validation = ui.can_move_on()
+            with c1:
+                if st.button("💾 Save", type="primary", use_container_width=True, key="editor_btn_save_top", disabled=not editor_validation):
+                    payload = _build_payload()
+                    try:
+                        existing = repo.load_labels(task["image_id"]) or {}
+                        original_labeler = existing.get("labeled_by") or review_target_user
+                        payload["labeled_by"] = original_labeler
+                        repo.save_labels(task["image_id"], payload, st.session_state.username)
+                        update_cache_with_saved_data(task["image_id"], payload)
+                        st.success("Saved ✔︎")
+                        st.session_state._features_restored_image = None
+                        st.rerun()
+                    except PermissionError as pe:
+                        st.error(str(pe))
+                    except Exception as e:
+                        st.error(f"Failed to save changes: {e}")
+            with c2:
+                if st.button("🔄 Refresh", type="secondary", use_container_width=True, key="editor_btn_refresh_top"):
+                    clear_cache()
+                    st.session_state._last_loaded_id = None
+                    st.rerun()
+            with c3:
+                if st.button("✅ Confirm", use_container_width=True, key="editor_btn_confirm_top"):
+                    try:
+                        repo.confirm_labels(task["image_id"], st.session_state.username)
+                        try:
+                            st.toast("✅ Labels confirmed", icon="✅")
+                        except Exception:
+                            st.success("✅ Labels confirmed")
+                        st.session_state.current_task = repo.get_next_editor_task(review_target_user, after_image_id=task["image_id"]) or None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to confirm: {e}")
+
+        # Build editable UI
+        st.markdown("---")
+        col_left, col_mid, col_right = st.columns([1.0, 1.0, 1.0])
+        with col_left:
+            ui.build_dropdown_cascade_ui()
+        with col_mid:
+            ui.build_feature_ui()
+        with col_right:
+            ui.build_contextual_attribute_ui()
+
+        st.markdown("---")
+        ui.build_condition_scores_ui()
+
+        # Notes section
+        st.subheader("📝 Additional Information")
+        st.session_state.notes = st.text_area("Notes", value=st.session_state.notes, height=80, key="editor_notes")
+
+        # (Save/Refresh now live in the top row)
+
+        # Jump to image for editor (target user's history; skip confirmed)
+        st.markdown("---")
+        go_left, go_mid, go_right = st.columns([3, 1, 3], gap="small")
+        with go_mid:
+            min_val = 1
+            max_val = max(1, int(counters.get("processed", 0))) if counters else 1
+            default_val = min(max_val, max(min_val, int(progress_current) if progress_current else min_val))
+            goto = st.number_input(
+                "Go to image #",
+                min_value=min_val,
+                max_value=max_val,
+                value=default_val,
+                step=1,
+                key="editor_goto_input",
+                label_visibility="collapsed",
+            )
+            if st.button("🔎 Go", use_container_width=True, key="editor_btn_goto"):
+                try:
+                    total = int(counters.get("processed", 0)) if counters else 0
+                    if not total:
+                        st.warning("No image history available to jump to.")
+                    else:
+                        target_number = int(goto)
+                        if target_number < 1 or target_number > total:
+                            st.warning("Invalid image number.")
+                        else:
+                            hist = repo.get_user_history(review_target_user, limit=total)
+                            idx = total - target_number
+                            if 0 <= idx < len(hist):
+                                entry = hist[idx]
+                                image_id = entry.get("image_id")
+                                if image_id:
+                                    img_doc = repo.get_image_doc(image_id) or {}
+                                    qa = img_doc.get("qa_status")
+                                    if qa == "confirmed":
+                                        st.warning("This image is confirmed and cannot be edited.")
+                                    else:
+                                        img_doc.update({"image_id": image_id})
+                                        clear_cache()
+                                        st.session_state._features_restored_image = None
+                                        st.session_state.current_task = img_doc
+                                        st.session_state._last_loaded_id = None
+                                        st.rerun()
+                            else:
+                                st.warning("Invalid image number.")
+                except Exception as e:
+                    logger.error(f"[EDITOR NAV] Go-to failed: {e}")
+                    st.warning("Could not jump to the requested image.")
 
     else:
         # ------------------------------------------------------------------

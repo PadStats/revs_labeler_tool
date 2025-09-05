@@ -4,9 +4,17 @@
 Moved under admin_tools for organisational clarity.
 
 Usage examples:
+    # create with password (default role labeler)
     python -m admin_tools.provision_user alice S3cretPass!
+
+    # set role at creation time
     python -m admin_tools.provision_user bob MyPass --role reviewer
-    python -m admin_tools.provision_user carol --disable
+
+    # role-only update (keep existing password hash)
+    python -m admin_tools.provision_user carol --role qa_editor
+
+    # disable account (no password needed)
+    python -m admin_tools.provision_user dave --disable
 """
 
 from __future__ import annotations
@@ -51,7 +59,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("username", help="Firestore document ID (username)")
     parser.add_argument(
-        "password", nargs="?", help="Raw password (omit when --disable)")
+        "password", nargs="?", help="Raw password (optional; not needed for role-only updates)")
     parser.add_argument("--role", default="labeler", help="Role string (default: labeler)")
     parser.add_argument(
         "--disable",
@@ -59,8 +67,7 @@ def _parse_args() -> argparse.Namespace:
         help="Disable the account instead of (re)enabling it",
     )
     args = parser.parse_args()
-    if not args.disable and not args.password:
-        parser.error("password is required unless --disable is given")
+    # Password is optional. When omitted, we perform role-only and/or enabled/disabled updates.
     return args
 
 
@@ -72,6 +79,7 @@ def main() -> None:
         "enabled": not args.disable,
         "role": args.role,
     }
+    # Only update password_hash when a new password is supplied; otherwise keep existing
     if args.password:
         payload["password_hash"] = bcrypt.hashpw(
             args.password.encode(), bcrypt.gensalt()
@@ -79,7 +87,16 @@ def main() -> None:
 
     db.collection("REVS_users").document(args.username).set(payload, merge=True)
 
-    action = "disabled" if args.disable else "provisioned / updated"
+    if args.disable:
+        action = "disabled"
+    elif args.password and args.role:
+        action = "provisioned / updated (password + role)"
+    elif args.password:
+        action = "updated (password)"
+    elif args.role:
+        action = "updated (role only)"
+    else:
+        action = "updated"
     print(f"✓ user '{args.username}' {action}")
 
 

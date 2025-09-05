@@ -20,6 +20,19 @@ class LabelRepo(Protocol):
     def save_labels(self, image_id: str, payload: Dict, user_id: str) -> None:
         """Persist labels & mark task done."""
 
+    # --- review/editor flows ---
+    def get_next_review_task(self, labeler_id: str, after_image_id: str | None = None) -> Optional[Dict]:
+        """Return next pending image for QA review (admin UI)."""
+
+    def get_prev_review_task(self, labeler_id: str, before_image_id: str) -> Optional[Dict]:
+        """Return previous pending image for QA review (admin UI)."""
+
+    def get_next_editor_task(self, labeler_id: str, after_image_id: str | None = None) -> Optional[Dict]:
+        """Return next editable image (qa_status in {pending, review}) for QA editor."""
+
+    def get_prev_editor_task(self, labeler_id: str, before_image_id: str) -> Optional[Dict]:
+        """Return previous editable image (qa_status in {pending, review}) for QA editor."""
+
     # --- helper ---
     def get_image_url(self, image_doc: Dict) -> str:
         """Translate storage pointer into a displayable URL."""

@@ -99,7 +99,7 @@ class FirestoreRepo(LabelRepo):
             new_q = (
                 self.images.where("status", "==", "unlabeled")
                 .order_by("timestamp_uploaded")
-                .limit(20)  # Get more candidates to check availability
+                .limit(50)  # Scan a wider window to avoid starvation when many properties are taken
             )
             candidate_docs = list(new_q.stream(transaction=txn))
             
@@ -143,8 +143,9 @@ class FirestoreRepo(LabelRepo):
                     .limit(1)
                 )
                 existing_users = list(property_taken_q.stream(transaction=txn))
-                
-                if existing_users:
+                # Allow the same user to continue on their property; skip only if taken by someone else
+                taken_by_other = any(u.id != user_id for u in existing_users)
+                if taken_by_other:
                     continue  # Property taken by another user, try next image
                 
                 # Property is available! Claim it
@@ -437,3 +438,48 @@ class FirestoreRepo(LabelRepo):
                 prev = img_doc.copy()
                 prev["image_id"] = img_id
         return None 
+
+    # ------------------------------------------------------------------
+    # QA editor navigation (pending or review; exclude confirmed)
+    # ------------------------------------------------------------------
+    def get_next_editor_task(self, labeler_id: str, after_image_id: str | None = None) -> Optional[Dict]:  # noqa: D401
+        q = (
+            self.labels.where("labeled_by", "==", labeler_id)
+            .order_by("timestamp_created", direction=firestore.Query.DESCENDING)
+            .limit(200)
+        )
+        found = after_image_id is None
+        for lbl_snap in q.stream():
+            img_id = lbl_snap.id
+            if not found:
+                if img_id == after_image_id:
+                    found = True
+                continue
+            img_snap = self.images.document(img_id).get()
+            if not img_snap.exists:
+                continue
+            img_doc = img_snap.to_dict() or {}
+            if img_doc.get("qa_status") in ("pending", "review"):
+                img_doc.update({"image_id": img_id})
+                return img_doc
+        return None
+
+    def get_prev_editor_task(self, labeler_id: str, before_image_id: str) -> Optional[Dict]:  # noqa: D401
+        q = (
+            self.labels.where("labeled_by", "==", labeler_id)
+            .order_by("timestamp_created", direction=firestore.Query.DESCENDING)
+            .limit(200)
+        )
+        prev = None
+        for lbl_snap in q.stream():
+            img_id = lbl_snap.id
+            if img_id == before_image_id:
+                return prev
+            img_snap = self.images.document(img_id).get()
+            if not img_snap.exists:
+                continue
+            img_doc = img_snap.to_dict() or {}
+            if img_doc.get("qa_status") in ("pending", "review"):
+                prev = img_doc.copy()
+                prev["image_id"] = img_id
+        return None
