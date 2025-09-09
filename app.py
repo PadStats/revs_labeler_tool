@@ -66,6 +66,12 @@ def _init_state() -> None:
             'image_bytes': None,   # raw bytes of downloaded image
             'image_meta': None     # (width, height)
         }
+    # Prefetched resolver cache for upcoming images
+    if "prefetch_urls" not in st.session_state:
+        st.session_state.prefetch_urls = {}
+    # Progress cache to avoid re-computing exact position on every rerun
+    if "progress_cache" not in st.session_state:
+        st.session_state.progress_cache = {}
 
     # Counter to detect widget-triggered reruns (used by cache logic)
     if "widget_refresh_counter" not in st.session_state:
@@ -955,48 +961,20 @@ def main() -> None:  # noqa: C901
             image_html = _html_image_from_b64(b64, w, h, "Cache", task['image_id'], admin=is_admin)
             image_displayed = True
     else:
-        # Try each image source and cache the first successful bytes download
+        # URL-only path: do not attempt server-side bytes/base64; warn and continue
         for source_name, url in image_sources:
-            # 1) Fast path: render by URL so the browser fetches and caches bytes
             try:
                 image_html = _html_image_from_url(url, source_name, task['image_id'], admin=is_admin)
                 image_displayed = True
-
-                # Cache URL mode for future reruns
                 cache_entry['display_mode'] = 'url'
                 cache_entry['simple_url'] = url
-                # Keep resolved_url timestamp if this was API Endpoint
                 if source_name == "API Endpoint":
                     cache_entry['resolved_url'] = url
                     cache_entry['resolved_url_ts'] = cache_entry.get('resolved_url_ts') or time.time()
                 break
             except Exception as e:
-                # 2) Fallback: attempt server-side fetch/bytes path (rare)
-                try:
-                    response = requests.get(url, timeout=10)
-                    response.raise_for_status()
-                    content_type = response.headers.get('content-type', '')
-                    if not content_type.startswith('image/'):
-                        raise ValueError(f"URL returned non-image content: {content_type}")
-                    img_bytes = response.content
-                    img = Image.open(BytesIO(img_bytes))
-                    img_b64 = base64.b64encode(img_bytes).decode()
-                    image_html = _html_image_from_b64(img_b64, img.size[0], img.size[1], source_name, task['image_id'], admin=is_admin)
-                    image_displayed = True
-                    cache_entry['image_bytes'] = img_bytes
-                    cache_entry['image_meta'] = img.size
-                    cache_entry['image_b64'] = img_b64
-                    cache_entry['display_mode'] = 'bytes'
-                    cache_entry['simple_url'] = None
-                    logger.info(f"[CACHE] Stored image bytes for {task['image_id']}")
-                    break
-                except Exception as inner_e:
-                    # Invalidate API Endpoint cache if that was the source
-                    if source_name == "API Endpoint":
-                        cache_entry['resolved_url'] = None
-                        cache_entry['resolved_url_ts'] = None
-                    st.warning(f"⚠️ Failed to display via {source_name}: {e or inner_e}")
-                    continue
+                logger.warning(f"[IMG] URL render failed for source {source_name}: {e}")
+                continue
     
     # If no image sources worked, allow user to skip
     if not image_displayed:
@@ -1079,24 +1057,31 @@ def main() -> None:  # noqa: C901
     try:
         if counters and task:
             progress_total = int(counters.get("processed", 0))
-            if task.get("status") == "labeled" and progress_total > 0:
-                # Fetch full labeled history to determine absolute position
-                try:
-                    history_user = review_target_user if (is_admin_review or is_editor_review) else st.session_state.username
-                    hist = repo.get_user_history(history_user, limit=max(1, progress_total))
-                    current_idx = None
-                    for idx, entry in enumerate(hist):
-                        if entry.get("image_id") == task.get("image_id"):
-                            current_idx = idx
-                            break
-                    if current_idx is not None:
-                        # newest (idx 0) => progress_current = progress_total
-                        progress_current = progress_total - current_idx
-                except Exception:
-                    pass
-            elif task.get("status") != "labeled" and progress_total is not None:
-                # When labeling a new image, show next number as a hint
-                progress_current = progress_total + 1
+            history_user = review_target_user if (is_admin_review or is_editor_review) else st.session_state.username
+            image_id_key = task.get("image_id")
+            cache_key = f"{history_user}|{image_id_key}|{progress_total}"
+            # Reuse cached position if present for this user/image/total
+            if cache_key in st.session_state.progress_cache:
+                progress_current = st.session_state.progress_cache[cache_key]
+            else:
+                if task.get("status") == "labeled" and progress_total > 0:
+                    # Fetch just enough history to find the current image
+                    try:
+                        hist = repo.get_user_history(history_user, limit=max(1, progress_total))
+                        current_idx = None
+                        for idx, entry in enumerate(hist):
+                            if entry.get("image_id") == task.get("image_id"):
+                                current_idx = idx
+                                break
+                        if current_idx is not None:
+                            progress_current = progress_total - current_idx
+                    except Exception:
+                        pass
+                elif task.get("status") != "labeled" and progress_total is not None:
+                    progress_current = progress_total + 1
+                # Store in cache if computed
+                if progress_current is not None:
+                    st.session_state.progress_cache[cache_key] = progress_current
     except Exception:
         pass
 
@@ -1121,6 +1106,38 @@ def main() -> None:  # noqa: C901
 
     # QA feedback banners will be shown in labeler mode only, positioned after navigation buttons
     confirmed_readonly = False
+
+    # Lightweight prefetch of next image URL (non-blocking best-effort)
+    try:
+        # Only prefetch when we have a current image and a repo method exists
+        next_task_hint = None
+        if is_admin_review and task:
+            next_task_hint = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])  # type: ignore[attr-defined]
+        elif is_editor_review and task:
+            next_task_hint = repo.get_next_editor_task(review_target_user, after_image_id=task["image_id"])  # type: ignore[attr-defined]
+        elif task and task.get("status") == "labeled":
+            # For labelers browsing history, prefetch next labeled image if any
+            try:
+                hist = repo.get_user_history(st.session_state.username, limit=50)
+                for idx, entry in enumerate(hist):
+                    if entry.get("image_id") == task.get("image_id") and idx > 0:
+                        next_task_hint = {"image_id": hist[idx-1].get("image_id")}
+                        break
+            except Exception:
+                pass
+        if next_task_hint and next_task_hint.get("image_id"):
+            nid = next_task_hint["image_id"]
+            if nid not in st.session_state.prefetch_urls:
+                try:
+                    ndoc = repo.get_image_doc(nid) or {}
+                    # Resolve signed URL with a short timeout via repo.get_image_url
+                    url = repo.get_image_url(ndoc)
+                    st.session_state.prefetch_urls[nid] = url
+                except Exception:
+                    # Best-effort; ignore failures
+                    pass
+    except Exception:
+        pass
 
     # ------------------------------------------------------------------
     # Restore feature state EARLY - before UI
