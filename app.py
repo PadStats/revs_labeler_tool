@@ -1107,7 +1107,7 @@ def main() -> None:  # noqa: C901
     # QA feedback banners will be shown in labeler mode only, positioned after navigation buttons
     confirmed_readonly = False
 
-    # Lightweight prefetch of next image URL (non-blocking best-effort)
+    # Lightweight prefetch of next image URL (and labels in editor) – non-blocking best-effort
     try:
         # Only prefetch when we have a current image and a repo method exists
         next_task_hint = None
@@ -1135,6 +1135,15 @@ def main() -> None:  # noqa: C901
                     st.session_state.prefetch_urls[nid] = url
                 except Exception:
                     # Best-effort; ignore failures
+                    pass
+            # Prefetch labels for QA editor (read-only cache)
+            if is_editor_review:
+                try:
+                    pre_labels_cache = st.session_state.get("prefetch_labels", {})
+                    if nid not in pre_labels_cache:
+                        pre_labels_cache[nid] = repo.load_labels(nid) or {}
+                        st.session_state.prefetch_labels = pre_labels_cache
+                except Exception:
                     pass
     except Exception:
         pass

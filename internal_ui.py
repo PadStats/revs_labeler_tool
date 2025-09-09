@@ -470,7 +470,7 @@ def build_location_chain(chain_index: int):
     container = st.container()
     with container:
         if len(st.session_state.location_chains) > 1 and st.button(
-            "❌", key=f"remove_chain_{chain_index}_{st.session_state.widget_refresh_counter}"
+            "❌", key=f"remove_chain_{chain_index}"
         ):
             # Store the leaf location name for thorough cleanup
             if chain:
@@ -570,8 +570,8 @@ def build_location_chain(chain_index: int):
             if not opts: break
             if level > 0: opts += ["N/A"]
 
-            # Use a simpler key that doesn't rely on widget_refresh_counter for state storage
-            w_key = f"chain_{chain_index}_level_{level}_{st.session_state.widget_refresh_counter}"
+            # Stable widget key per chain/level to avoid unnecessary resets across reruns
+            w_key = f"chain_{chain_index}_level_{level}"
             state_key = f"chain_{chain_index}_level_{level}_state"
             
             # Get stored value from our dedicated state storage
@@ -672,7 +672,7 @@ def build_dropdown_cascade_ui():
 
         col1, _ = st.columns([1, 3])
         with col1:
-            if st.button("➕ Add Another Location", key=f"add_location_{st.session_state.widget_refresh_counter}"):
+            if st.button("➕ Add Another Location", key="add_location"):
                 # Comprehensive cleanup of any stale persistent state before adding new location
                 # This prevents data from previously removed locations from reappearing
                 
@@ -964,8 +964,8 @@ def build_contextual_attribute_ui():
         elif current_value in opts:
             idx = opts.index(current_value) + 2  # +2 because we add blank and N/A options
         
-        # Create a unique widget key
-        widget_key = f"attr_{attr}_{st.session_state.widget_refresh_counter}"
+        # Create a stable widget key per attribute
+        widget_key = f"attr_{attr}"
         
         # Display the dropdown with a blank first option
         choice = st.selectbox(
@@ -1010,7 +1010,7 @@ def build_condition_scores_ui():
         st.markdown("### 🏠 Property Condition")
         st.caption("Overall condition of the property structure and systems")
         
-        prop_key = f"prop_condition_slider_{st.session_state.widget_refresh_counter}"
+        prop_key = "prop_condition_slider"
         current_prop_score = st.session_state.condition_scores["property_condition"]
         na_checked = st.session_state.get("property_condition_na", False)
         confirm_checked = st.session_state.property_condition_confirmed
@@ -1121,7 +1121,7 @@ def build_condition_scores_ui():
             ]
             
             current_quality = st.session_state.condition_scores["quality_of_construction"]
-            quality_key = f"quality_slider_{st.session_state.widget_refresh_counter}"
+            quality_key = "quality_slider"
             
             # Use select_slider for discrete selection with slider appearance
             selected_quality = st.segmented_control(
@@ -1156,7 +1156,7 @@ def build_condition_scores_ui():
             ]
             
             current_improvement = st.session_state.condition_scores["improvement_condition"]
-            improvement_key = f"improvement_slider_{st.session_state.widget_refresh_counter}"
+            improvement_key = "improvement_slider"
             
             # Use select_slider for discrete selection with slider appearance
             selected_improvement = st.segmented_control(
