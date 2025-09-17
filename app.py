@@ -379,6 +379,15 @@ def main() -> None:  # noqa: C901
                 st.session_state._last_review_user = review_target_user
                 if task is None:
                     st.success(f"🎉 No more images to review for {review_target_user}.")
+                    # Offer a manual refresh to re-query the queue
+                    ref_col = st.columns(1)[0]
+                    with ref_col:
+                        if st.button("🔁 Refresh queue", key="btn_refresh_review_queue"):
+                            # Clear review state and try again
+                            st.session_state.current_task = None
+                            st.session_state._last_review_user = None
+                            clear_cache()
+                            st.rerun()
                     return
             else:
                 task = st.session_state.current_task
@@ -393,6 +402,13 @@ def main() -> None:  # noqa: C901
                 st.session_state._last_review_user = review_target_user
                 if task is None:
                     st.success(f"🎉 No editable images for {review_target_user}.")
+                    ref_col = st.columns(1)[0]
+                    with ref_col:
+                        if st.button("🔁 Refresh queue", key="btn_refresh_editor_queue"):
+                            st.session_state.current_task = None
+                            st.session_state._last_review_user = None
+                            clear_cache()
+                            st.rerun()
                     return
             else:
                 task = st.session_state.current_task
@@ -1264,37 +1280,41 @@ def main() -> None:  # noqa: C901
         col_c, col_r = st.columns([1, 1], gap="small")
         with col_c:
             if st.button("✅ Confirm", type="primary", use_container_width=True):
-                repo.confirm_labels(task["image_id"], st.session_state.username)
-                # Visual confirmation for the reviewer
                 try:
-                    st.toast("✅ Labels confirmed", icon="✅")  # Streamlit ≥1.27
-                except Exception:
-                    st.success("✅ Labels confirmed")
-                # Store last action for potential undo
-                st.session_state.last_review_action = {
-                    "image_id": task["image_id"],
-                    "action": "confirmed",
-                    "labeler": review_target_user
-                }
-                st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])
-                st.rerun()
+                    repo.confirm_labels(task["image_id"], st.session_state.username)
+                    try:
+                        st.toast("✅ Labels confirmed", icon="✅")  # Streamlit ≥1.27
+                    except Exception:
+                        st.success("✅ Labels confirmed")
+                    # Store last action for potential undo
+                    st.session_state.last_review_action = {
+                        "image_id": task["image_id"],
+                        "action": "confirmed",
+                        "labeler": review_target_user
+                    }
+                    st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"]) 
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to confirm: {e}")
         with col_r:
             if st.button("↩️ Needs changes", use_container_width=True):
-                repo.request_revision(task["image_id"], review_target_user, st.session_state.username, fb_input)
-                # Visual confirmation for the reviewer
                 try:
-                    st.toast("↩️ Revision requested", icon="✍️")
-                except Exception:
-                    st.info("↩️ Revision requested")
-                # Store last action for potential undo
-                st.session_state.last_review_action = {
-                    "image_id": task["image_id"],
-                    "action": "needs_changes",
-                    "labeler": review_target_user,
-                    "feedback": fb_input
-                }
-                st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])
-                st.rerun()
+                    repo.request_revision(task["image_id"], review_target_user, st.session_state.username, fb_input)
+                    try:
+                        st.toast("↩️ Revision requested", icon="✍️")
+                    except Exception:
+                        st.info("↩️ Revision requested")
+                    # Store last action for potential undo
+                    st.session_state.last_review_action = {
+                        "image_id": task["image_id"],
+                        "action": "needs_changes",
+                        "labeler": review_target_user,
+                        "feedback": fb_input
+                    }
+                    st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"]) 
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to request revision: {e}")
 
         # Admin review: show current selections with improved layout
         st.markdown("---")
@@ -2067,24 +2087,29 @@ def main() -> None:  # noqa: C901
         with save_col:
             if st.button("💾 Save Labels", type="primary", use_container_width=True,
                          disabled=not current_validation, key="btn_save"):
-                print(f"[APP DEBUG] Save button clicked for image {task['image_id']}")
-                payload = _build_payload()
-                print(f"[APP DEBUG] Payload built: {len(payload)} fields")
-                print(f"[APP DEBUG] Calling repo.save_labels with user: {st.session_state.username}")
-                logger.info(f"[FS] Saving labels for image {task['image_id']}")
-                repo.save_labels(task["image_id"], payload, st.session_state.username)
-                print(f"[APP DEBUG] repo.save_labels completed successfully")
-                update_cache_with_saved_data(task["image_id"], payload)
-                # Mark as labeled for downstream logic
-                task["status"] = "labeled"
-                # Also update qa_status to match what happens in the backend
-                task["qa_status"] = "pending"
-                st.session_state.current_task = task  # Update the session state with the new status
-                st.success("Saved ✔︎")
-                # Reset tracker so that feature state is re-applied on the subsequent rerun. This prevents
-                # the 'Current Selections' box from momentarily showing no features right after saving.
-                st.session_state._features_restored_image = None
-                st.rerun()
+                try:
+                    print(f"[APP DEBUG] Save button clicked for image {task['image_id']}")
+                    payload = _build_payload()
+                    print(f"[APP DEBUG] Payload built: {len(payload)} fields")
+                    print(f"[APP DEBUG] Calling repo.save_labels with user: {st.session_state.username}")
+                    logger.info(f"[FS] Saving labels for image {task['image_id']}")
+                    repo.save_labels(task["image_id"], payload, st.session_state.username)
+                    print(f"[APP DEBUG] repo.save_labels completed successfully")
+                    update_cache_with_saved_data(task["image_id"], payload)
+                    # Mark as labeled for downstream logic
+                    task["status"] = "labeled"
+                    # Also update qa_status to match what happens in the backend
+                    task["qa_status"] = "pending"
+                    st.session_state.current_task = task  # Update the session state with the new status
+                    st.success("Saved ✔︎")
+                    # Reset tracker so that feature state is re-applied on the subsequent rerun. This prevents
+                    # the 'Current Selections' box from momentarily showing no features right after saving.
+                    st.session_state._features_restored_image = None
+                    st.rerun()
+                except PermissionError as pe:
+                    st.error(str(pe))
+                except Exception as e:
+                    st.error(f"Failed to save: {e}")
 
         # Refresh from Firestore
         with refresh_col:
