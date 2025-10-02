@@ -71,6 +71,10 @@ def reset_session_state_to_defaults() -> None:  # shortened: same as legacy
     for key in list(st.session_state.keys()):
         if key.startswith(("na_", "sel_")):
             st.session_state.pop(key, None)
+        # Also clear any persisted widget values for spatial chain selectors so
+        # defaults from loaded chains take effect on the next render
+        if key.startswith("chain_"):
+            st.session_state.pop(key, None)
 
     st.session_state.location_chains = [{}]
     st.session_state.feature_labels = set()
@@ -158,6 +162,14 @@ def chains_to_label_strings() -> List[str]:
 
 
 def label_strings_to_chains(label_strings: List[str]) -> List[Dict]:
+    def _norm(txt: str) -> str:
+        # Normalise aggressively for robust matching against taxonomy keys
+        # - lower-case, remove punctuation, dashes/underscores/spaces → nothing
+        import re
+        s = txt.strip().lower()
+        s = re.sub(r"[^a-z0-9]", "", s)  # keep alphanumerics only
+        return s
+
     chains = []
     complete_paths = []
     for s in label_strings:
@@ -166,11 +178,36 @@ def label_strings_to_chains(label_strings: List[str]) -> List[Dict]:
         parts = s.split(" > ")
         if all(not other.startswith(s + " > ") for other in label_strings):
             complete_paths.append(parts)
+
     for parts in complete_paths:
         chain = {}
-        for i, p in enumerate(parts):
-            chain[f"level_{i}"] = p
-        if not is_leaf_node(LOCATION_TAXONOMY["spatial"], parts):
+        canonical_path: List[str] = []
+        # If the first part doesn't match any root keys, try to snap to the best root
+        root_options = list(LOCATION_TAXONOMY["spatial"].keys()) if isinstance(LOCATION_TAXONOMY["spatial"], dict) else []
+        def _snap(part: str, options: List[str], path_prefix: List[str]) -> str:
+            if not options:
+                return part
+            t = _norm(part)
+            # exact match first
+            for opt in options:
+                if _norm(opt) == t:
+                    return opt
+            # containment fallback
+            for opt in options:
+                nopt = _norm(opt)
+                if t in nopt or nopt in t:
+                    return opt
+            # last resort: keep original
+            return part
+
+        for i, raw_part in enumerate(parts):
+            options = get_children_options(LOCATION_TAXONOMY["spatial"], canonical_path) if i > 0 else root_options
+            chosen = _snap(raw_part, options, canonical_path)
+            chain[f"level_{i}"] = chosen
+            canonical_path.append(chosen)
+
+        # If the final node is not a leaf, append an explicit N/A sentinel
+        if not is_leaf_node(LOCATION_TAXONOMY["spatial"], canonical_path):
             chain[f"level_{len(parts)}"] = "N/A"
         chains.append(chain)
     return chains if chains else [{}]
@@ -573,14 +610,42 @@ def build_location_chain(chain_index: int):
             # Stable widget key per chain/level to avoid unnecessary resets across reruns
             w_key = f"chain_{chain_index}_level_{level}"
             state_key = f"chain_{chain_index}_level_{level}_state"
-            
+
             # Get stored value from our dedicated state storage
             if state_key in st.session_state.widget_states:
                 stored = st.session_state.widget_states[state_key]
             else:
                 stored = prev
                 st.session_state.widget_states[state_key] = stored
-            
+
+            # If the stored value is not in current options (taxonomy drift), try fallbacks
+            if stored not in opts and stored:
+                # 1) Prefer previous chain value if valid
+                if prev in opts and prev:
+                    stored = prev
+                else:
+                    # 2) Snap to closest option using same normalisation as label_strings_to_chains
+                    def _norm(txt: str) -> str:
+                        import re
+                        s = txt.strip().lower()
+                        return re.sub(r"[^a-z0-9]", "", s)
+                    t = _norm(str(stored))
+                    snapped = None
+                    for opt in opts:
+                        if _norm(opt) == t:
+                            snapped = opt
+                            break
+                    if snapped is None:
+                        for opt in opts:
+                            nopt = _norm(opt)
+                            if t in nopt or nopt in t:
+                                snapped = opt
+                                break
+                    if snapped:
+                        stored = snapped
+                # Persist the corrected value back to shadow storage
+                st.session_state.widget_states[state_key] = stored
+
             idx = opts.index(stored) + 1 if stored in opts else 0
 
             if level == 0:
@@ -886,16 +951,11 @@ def build_feature_ui():
 
 
 def build_contextual_attribute_ui():
-    print("DEBUG: build_contextual_attribute_ui CALLED")
     st.markdown("### 🏷️ Contextual Attributes")
     complete = get_complete_chains()
     if not complete:
         st.info("👆 Complete locations first.")
         return
-    
-    print("DEBUG: location_attributes BEFORE restore:", st.session_state.location_attributes)
-    restore_attribute_state()
-    print("DEBUG: location_attributes AFTER restore:", st.session_state.location_attributes)
     
     # Collect all relevant attributes across all locations
     all_relevant_attrs = set()

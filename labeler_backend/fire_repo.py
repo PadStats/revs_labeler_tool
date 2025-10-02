@@ -398,7 +398,7 @@ class FirestoreRepo(LabelRepo):
         q = (
             self.labels.where("labeled_by", "==", labeler_id)
             .order_by("timestamp_created", direction=firestore.Query.DESCENDING)
-            .limit(200)
+            .limit(2000)
         )
         found = after_image_id is None
         for lbl_snap in q.stream():
@@ -423,7 +423,7 @@ class FirestoreRepo(LabelRepo):
         q = (
             self.labels.where("labeled_by", "==", labeler_id)
             .order_by("timestamp_created", direction=firestore.Query.DESCENDING)
-            .limit(200)
+            .limit(2000)
         )
         prev = None
         for lbl_snap in q.stream():
@@ -446,7 +446,7 @@ class FirestoreRepo(LabelRepo):
         q = (
             self.labels.where("labeled_by", "==", labeler_id)
             .order_by("timestamp_created", direction=firestore.Query.DESCENDING)
-            .limit(200)
+            .limit(2000)
         )
         found = after_image_id is None
         for lbl_snap in q.stream():
@@ -468,7 +468,7 @@ class FirestoreRepo(LabelRepo):
         q = (
             self.labels.where("labeled_by", "==", labeler_id)
             .order_by("timestamp_created", direction=firestore.Query.DESCENDING)
-            .limit(200)
+            .limit(2000)
         )
         prev = None
         for lbl_snap in q.stream():

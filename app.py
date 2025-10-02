@@ -215,7 +215,14 @@ def show_login_gate():
             password = st.text_input("Password", type="password", key="login_password")
             
             if st.button("Log in", disabled=not (username and password), use_container_width=True):
-                snap = auth.get_user_doc(username)
+                try:
+                    snap = auth.get_user_doc(username)
+                except Exception as e:
+                    # Surface a friendly message when credentials or Firestore access are misconfigured
+                    logger.error(f"[AUTH] Login failed due to backend error: {e}")
+                    st.error("Login service is temporarily unavailable. Please contact an administrator.")
+                    st.caption("Hint: server Firestore credentials may be invalid (e.g. invalid_grant).")
+                    return
                 if not snap.exists:
                     st.error("Unknown user or password")
                     return
@@ -379,15 +386,6 @@ def main() -> None:  # noqa: C901
                 st.session_state._last_review_user = review_target_user
                 if task is None:
                     st.success(f"🎉 No more images to review for {review_target_user}.")
-                    # Offer a manual refresh to re-query the queue
-                    ref_col = st.columns(1)[0]
-                    with ref_col:
-                        if st.button("🔁 Refresh queue", key="btn_refresh_review_queue"):
-                            # Clear review state and try again
-                            st.session_state.current_task = None
-                            st.session_state._last_review_user = None
-                            clear_cache()
-                            st.rerun()
                     return
             else:
                 task = st.session_state.current_task
@@ -402,13 +400,6 @@ def main() -> None:  # noqa: C901
                 st.session_state._last_review_user = review_target_user
                 if task is None:
                     st.success(f"🎉 No editable images for {review_target_user}.")
-                    ref_col = st.columns(1)[0]
-                    with ref_col:
-                        if st.button("🔁 Refresh queue", key="btn_refresh_editor_queue"):
-                            st.session_state.current_task = None
-                            st.session_state._last_review_user = None
-                            clear_cache()
-                            st.rerun()
                     return
             else:
                 task = st.session_state.current_task
@@ -477,9 +468,23 @@ def main() -> None:  # noqa: C901
             else:
                 labels_list = raw_spatial
 
+            # Build chains and also initialise widget_states for spatial selectors
             st.session_state.location_chains = (
                 ui.label_strings_to_chains(labels_list) if labels_list else [{}]
             )
+            # Pre-seed widget state values for each level to align selectbox defaults
+            try:
+                for chain_index, chain in enumerate(st.session_state.location_chains):
+                    for level_key, value in chain.items():
+                        if level_key.startswith("level_"):
+                            w_key = f"chain_{chain_index}_{level_key}"
+                            # Shadow storage for our own state handling
+                            st.session_state.widget_states[f"{w_key}_state"] = value
+                            # Also prime the actual widget key so Streamlit renders the desired default
+                            if st.session_state.get(w_key) != value:
+                                st.session_state[w_key] = value
+            except Exception:
+                pass
 
             # Notes & flag
             st.session_state.notes = existing.get("notes", "")
@@ -576,6 +581,21 @@ def main() -> None:  # noqa: C901
                         st.session_state.persistent_feature_state[f"persistent_na_{loc}_{category}"] = True
                         st.session_state.persistent_feature_state[f"persistent_sel_{loc}_{category}"] = []
 
+            # Immediately reflect persistent_feature_state into current UI selection keys
+            # so the first render of this image shows the correct feature selections.
+            for loc in ui.get_leaf_locations():
+                if loc not in ui.FEATURE_TAXONOMY:
+                    continue
+                for category in ui.FEATURE_TAXONOMY[loc]:
+                    na_key = f"na_{loc}_{category}"
+                    sel_key = f"sel_{loc}_{category}"
+                    persistent_na_key = f"persistent_na_{loc}_{category}"
+                    persistent_sel_key = f"persistent_sel_{loc}_{category}"
+                    if persistent_na_key in st.session_state.persistent_feature_state:
+                        st.session_state[na_key] = st.session_state.persistent_feature_state[persistent_na_key]
+                    if persistent_sel_key in st.session_state.persistent_feature_state:
+                        st.session_state[sel_key] = st.session_state.persistent_feature_state[persistent_sel_key]
+
             # Attributes
             st.session_state.location_attributes = {}
             attrs_map = existing.get("attributes", {})
@@ -667,6 +687,13 @@ def main() -> None:  # noqa: C901
                 for attr, value in attrs.items():
                     persistent_key = f"persistent_{location_key}_{attr}"
                     st.session_state.persistent_attribute_state[persistent_key] = value
+
+            # Immediately restore attribute selections into the live UI state so
+            # they appear on the first render for this image.
+            ui.restore_attribute_state()
+
+            # Ensure condition state is also restored before widgets are created
+            ui.restore_condition_state()
 
             # Condition scores
             cond = existing.get("condition_scores", {})
@@ -803,6 +830,12 @@ def main() -> None:  # noqa: C901
             ui_state = build_complete_ui_state()
             cache_task_data(image_id, task, existing, ui_state)
 
+            # One-time rerun to ensure widget defaults pick up restored state on first render
+            # (critical for QA editor where widgets need session_state values set before creation)
+            if (is_admin_review or is_editor_review) and st.session_state.get("_ui_initialized_for") != image_id:
+                st.session_state._ui_initialized_for = image_id
+                st.rerun()
+
         else:
             # No existing labels document – start with defaults and cache blank label set
             ui.reset_session_state_to_defaults()
@@ -917,6 +950,17 @@ def main() -> None:  # noqa: C901
         "cache": cache,
         "hit": hit,
     }
+
+    # Before building UI, synchronise spatial widget keys with current chains (idempotent)
+    try:
+        for _chain_index, _chain in enumerate(st.session_state.location_chains):
+            for _level_key, _val in _chain.items():
+                if _level_key.startswith("level_"):
+                    _w_key = f"chain_{_chain_index}_{_level_key}"
+                    if st.session_state.get(_w_key) != _val:
+                        st.session_state[_w_key] = _val
+    except Exception:
+        pass
 
     # 2️⃣ display image in sticky header ----------------------------------------------------------
     image_displayed = False
@@ -1191,8 +1235,14 @@ def main() -> None:  # noqa: C901
         # Mark restoration done for this image
         st.session_state._features_restored_image = task["image_id"]
 
-    # Restore attribute state EARLY as well (from legacy)
-    ui.restore_attribute_state()
+    # Restore attribute state EARLY once per image to avoid overwriting user edits on reruns
+    try:
+        if st.session_state.get("_attrs_restored_image") != task["image_id"]:
+            ui.restore_attribute_state()
+            st.session_state._attrs_restored_image = task["image_id"]
+    except Exception:
+        # Fallback: do nothing if task/image not available yet
+        pass
 
     # Restore condition state EARLY as well (from legacy)
     ui.restore_condition_state()
@@ -1280,41 +1330,37 @@ def main() -> None:  # noqa: C901
         col_c, col_r = st.columns([1, 1], gap="small")
         with col_c:
             if st.button("✅ Confirm", type="primary", use_container_width=True):
+                repo.confirm_labels(task["image_id"], st.session_state.username)
+                # Visual confirmation for the reviewer
                 try:
-                    repo.confirm_labels(task["image_id"], st.session_state.username)
-                    try:
-                        st.toast("✅ Labels confirmed", icon="✅")  # Streamlit ≥1.27
-                    except Exception:
-                        st.success("✅ Labels confirmed")
-                    # Store last action for potential undo
-                    st.session_state.last_review_action = {
-                        "image_id": task["image_id"],
-                        "action": "confirmed",
-                        "labeler": review_target_user
-                    }
-                    st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"]) 
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to confirm: {e}")
+                    st.toast("✅ Labels confirmed", icon="✅")  # Streamlit ≥1.27
+                except Exception:
+                    st.success("✅ Labels confirmed")
+                # Store last action for potential undo
+                st.session_state.last_review_action = {
+                    "image_id": task["image_id"],
+                    "action": "confirmed",
+                    "labeler": review_target_user
+                }
+                st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])
+                st.rerun()
         with col_r:
             if st.button("↩️ Needs changes", use_container_width=True):
+                repo.request_revision(task["image_id"], review_target_user, st.session_state.username, fb_input)
+                # Visual confirmation for the reviewer
                 try:
-                    repo.request_revision(task["image_id"], review_target_user, st.session_state.username, fb_input)
-                    try:
-                        st.toast("↩️ Revision requested", icon="✍️")
-                    except Exception:
-                        st.info("↩️ Revision requested")
-                    # Store last action for potential undo
-                    st.session_state.last_review_action = {
-                        "image_id": task["image_id"],
-                        "action": "needs_changes",
-                        "labeler": review_target_user,
-                        "feedback": fb_input
-                    }
-                    st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"]) 
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to request revision: {e}")
+                    st.toast("↩️ Revision requested", icon="✍️")
+                except Exception:
+                    st.info("↩️ Revision requested")
+                # Store last action for potential undo
+                st.session_state.last_review_action = {
+                    "image_id": task["image_id"],
+                    "action": "needs_changes",
+                    "labeler": review_target_user,
+                    "feedback": fb_input
+                }
+                st.session_state.current_task = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])
+                st.rerun()
 
         # Admin review: show current selections with improved layout
         st.markdown("---")
@@ -2087,29 +2133,24 @@ def main() -> None:  # noqa: C901
         with save_col:
             if st.button("💾 Save Labels", type="primary", use_container_width=True,
                          disabled=not current_validation, key="btn_save"):
-                try:
-                    print(f"[APP DEBUG] Save button clicked for image {task['image_id']}")
-                    payload = _build_payload()
-                    print(f"[APP DEBUG] Payload built: {len(payload)} fields")
-                    print(f"[APP DEBUG] Calling repo.save_labels with user: {st.session_state.username}")
-                    logger.info(f"[FS] Saving labels for image {task['image_id']}")
-                    repo.save_labels(task["image_id"], payload, st.session_state.username)
-                    print(f"[APP DEBUG] repo.save_labels completed successfully")
-                    update_cache_with_saved_data(task["image_id"], payload)
-                    # Mark as labeled for downstream logic
-                    task["status"] = "labeled"
-                    # Also update qa_status to match what happens in the backend
-                    task["qa_status"] = "pending"
-                    st.session_state.current_task = task  # Update the session state with the new status
-                    st.success("Saved ✔︎")
-                    # Reset tracker so that feature state is re-applied on the subsequent rerun. This prevents
-                    # the 'Current Selections' box from momentarily showing no features right after saving.
-                    st.session_state._features_restored_image = None
-                    st.rerun()
-                except PermissionError as pe:
-                    st.error(str(pe))
-                except Exception as e:
-                    st.error(f"Failed to save: {e}")
+                print(f"[APP DEBUG] Save button clicked for image {task['image_id']}")
+                payload = _build_payload()
+                print(f"[APP DEBUG] Payload built: {len(payload)} fields")
+                print(f"[APP DEBUG] Calling repo.save_labels with user: {st.session_state.username}")
+                logger.info(f"[FS] Saving labels for image {task['image_id']}")
+                repo.save_labels(task["image_id"], payload, st.session_state.username)
+                print(f"[APP DEBUG] repo.save_labels completed successfully")
+                update_cache_with_saved_data(task["image_id"], payload)
+                # Mark as labeled for downstream logic
+                task["status"] = "labeled"
+                # Also update qa_status to match what happens in the backend
+                task["qa_status"] = "pending"
+                st.session_state.current_task = task  # Update the session state with the new status
+                st.success("Saved ✔︎")
+                # Reset tracker so that feature state is re-applied on the subsequent rerun. This prevents
+                # the 'Current Selections' box from momentarily showing no features right after saving.
+                st.session_state._features_restored_image = None
+                st.rerun()
 
         # Refresh from Firestore
         with refresh_col:
