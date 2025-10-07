@@ -708,6 +708,23 @@ def build_location_chain(chain_index: int):
                 for k in widget_keys_to_remove:
                     del st.session_state.widget_states[k]
 
+                # Also clear actual Streamlit widget values for deeper levels so they don't override indices
+                # Keys look like: chain_{chain_index}_level_{N}
+                widget_value_keys_to_remove = []
+                for k in list(st.session_state.keys()):
+                    if k.startswith(f"chain_{chain_index}_level_") and not k.endswith("_state"):
+                        parts = k.split("_")
+                        if len(parts) >= 4:
+                            try:
+                                key_level = int(parts[3])
+                                if key_level > level:
+                                    widget_value_keys_to_remove.append(k)
+                            except ValueError:
+                                continue
+
+                for k in widget_value_keys_to_remove:
+                    del st.session_state[k]
+
             if sel:
                 chain[key_lv] = sel
             else:

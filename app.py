@@ -957,7 +957,8 @@ def main() -> None:  # noqa: C901
             for _level_key, _val in _chain.items():
                 if _level_key.startswith("level_"):
                     _w_key = f"chain_{_chain_index}_{_level_key}"
-                    if st.session_state.get(_w_key) != _val:
+                    # Only seed missing keys; do not override existing user selections on reruns
+                    if _w_key not in st.session_state:
                         st.session_state[_w_key] = _val
     except Exception:
         pass
