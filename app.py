@@ -1059,6 +1059,9 @@ def main() -> None:  # noqa: C901
         if ts and (time.time() - ts) < resolved_ttl_seconds:
             resolved_url = cache_entry.get('resolved_url')
 
+    resolver_failed = False
+    resolver_error_msg = ""
+    
     if resolved_url is None:
         try:
             # get_image_url now checks Firestore cache and stores resolved URLs
@@ -1067,8 +1070,10 @@ def main() -> None:  # noqa: C901
             cache_entry['resolved_url_ts'] = time.time()
             logger.info(f"[CACHE] Stored resolved URL for {task['image_id']}")
         except Exception as e:
+            resolver_failed = True
+            resolver_error_msg = str(e)
             logger.warning(f"[RESOLVER] API resolver failed: {e}")
-            # Invalidate any stale cached values to force fallback to image_url
+            # Invalidate any stale cached values
             cache_entry['resolved_url'] = None
             cache_entry['resolved_url_ts'] = None
             cache_entry['simple_url'] = None
@@ -1076,17 +1081,32 @@ def main() -> None:  # noqa: C901
             # Remove from prefetch cache if present (might be stale)
             if task['image_id'] in st.session_state.prefetch_urls:
                 del st.session_state.prefetch_urls[task['image_id']]
-            logger.info(f"[FALLBACK] Will attempt to use raw image_url for {task['image_id']}")
+            
+            # Log resolver failure to Firestore (backend QA tracking)
+            try:
+                # Mark this specific image as having resolver issues
+                repo.images.document(task['image_id']).update({
+                    "resolver_failure_count": firestore.Increment(1),
+                    "last_resolver_failure": firestore.SERVER_TIMESTAMP,
+                    "last_resolver_error": resolver_error_msg[:500],  # Truncate to avoid large writes
+                })
+                
+                # Track global resolver failure statistics
+                repo.db.collection("REVS_metadata").document("resolver_stats").set({
+                    "total_failures": firestore.Increment(1),
+                    "total_images_affected": firestore.Increment(1),  # Unique images with failures
+                    "last_failure": firestore.SERVER_TIMESTAMP,
+                    "last_failed_image_id": task['image_id'],
+                }, merge=True)
+                
+                logger.info(f"[RESOLVER] Logged failure to Firestore for {task['image_id']}")
+            except Exception as log_err:
+                logger.warning(f"[RESOLVER] Failed to log error to Firestore: {log_err}")
 
-    # Candidate sources (resolved URL first, fallback to raw image_url)
+    # Only use resolved URL if available - no fallback
     image_sources: list[tuple[str, str]] = []
     if resolved_url:
         image_sources.append(("API Endpoint", resolved_url))
-
-    if task.get('image_url'):
-        image_sources.append(("Raw URL", task['image_url']))
-    else:
-        st.warning("⚠️ No raw image_url available in task")
 
     # ------------------------------------------------------------------
     # Reuse cached display if present (URL mode preferred for performance)
@@ -1123,12 +1143,12 @@ def main() -> None:  # noqa: C901
                 logger.warning(f"[IMG] URL render failed for source {source_name}: {e}")
                 continue
     
-    # If no image sources worked, allow user to skip
+    # If no image sources worked, show error message
     if not image_displayed:
-        st.error("❌ Unable to load image from any source")
-        st.markdown("**Available image sources:**")
-        for source_name, url in image_sources:
-            st.markdown(f"- {source_name}: `{url}`")
+        if resolver_failed:
+            st.error("❌ Image Resolver Service Failed - Unable to load image")
+        else:
+            st.error("❌ Unable to load image from any source")
         
         col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
