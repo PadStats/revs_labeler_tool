@@ -1053,11 +1053,8 @@ def build_contextual_attribute_ui():
         )
         
         # Update the selection immediately in session state
-        old_value = st.session_state.location_attributes[first_location_key].get(attr, "")
-        if choice != old_value:
-            st.session_state.location_attributes[first_location_key][attr] = choice
-            # Force immediate UI update
-            st.rerun()
+        # Removed st.rerun() to avoid expensive full page reload on every dropdown change
+        st.session_state.location_attributes[first_location_key][attr] = choice
         
         # Count completed attributes
         if choice != "":
@@ -1152,32 +1149,27 @@ def build_condition_scores_ui():
         with col_na:
             na = st.checkbox("N/A", value=na_checked, disabled=confirm_checked)
         
-        # Mutually exclusive logic
+        # Mutually exclusive logic - removed st.rerun() to avoid expensive full page reload
         if na and not na_checked:
             st.session_state.property_condition_na = True
             st.session_state.property_condition_confirmed = False
             save_condition_state()
-            st.rerun()
         elif confirm and not confirm_checked:
             st.session_state.property_condition_confirmed = True
             st.session_state.property_condition_na = False
             save_condition_state()
-            st.rerun()
         elif not na and na_checked:
             st.session_state.property_condition_na = False
             save_condition_state()
-            st.rerun()
         elif not confirm and confirm_checked:
             st.session_state.property_condition_confirmed = False
             save_condition_state()
-            st.rerun()
 
-        # If user adjusts the slider, immediately update session_state and trigger rerun
+        # Update slider value without full page reload
         if not (confirm_checked or na_checked):
             if abs(new_prop_score - current_prop_score) > 0.00009:  # tighter tolerance due to higher precision
                 st.session_state.condition_scores["property_condition"] = new_prop_score
                 save_condition_state()
-                st.rerun()
 
         st.markdown("---")
         
@@ -1213,7 +1205,6 @@ def build_condition_scores_ui():
             if selected_quality != current_quality:
                 st.session_state.condition_scores["quality_of_construction"] = selected_quality
                 save_condition_state()
-                st.rerun()
             
             # Show current selection
             if selected_quality:
@@ -1248,7 +1239,6 @@ def build_condition_scores_ui():
             if selected_improvement != current_improvement:
                 st.session_state.condition_scores["improvement_condition"] = selected_improvement
                 save_condition_state()
-                st.rerun()
             
             # Show current selection
             if selected_improvement:
@@ -1316,7 +1306,6 @@ def build_condition_scores_ui():
             }
             st.session_state.property_condition_confirmed = False
             save_condition_state()
-            st.rerun()
     
     # Save state after UI is built
     save_condition_state()

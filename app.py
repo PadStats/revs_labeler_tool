@@ -76,7 +76,13 @@ def _init_state() -> None:
     # Counter to detect widget-triggered reruns (used by cache logic)
     if "widget_refresh_counter" not in st.session_state:
         st.session_state.widget_refresh_counter = 0
-
+    
+    # Performance: cache expensive Firestore queries
+    if "user_history_cache" not in st.session_state:
+        st.session_state.user_history_cache = {}  # {user_id: (history_list, cached_at)}
+    if "user_counters_cache" not in st.session_state:
+        st.session_state.user_counters_cache = {}  # {user_id: (counters_dict, cached_at)}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
 
 def _update_cache_ui_state(update_timestamp: bool = False) -> None:
     """Refresh cached ui_state from current session state."""
@@ -145,6 +151,73 @@ def clear_cache() -> None:
         'image_bytes': None,   # raw bytes of downloaded image
         'image_meta': None     # (width, height)
     }
+    # Also clear expensive query caches
+    st.session_state.user_history_cache = {}
+    st.session_state.user_counters_cache = {}
+    st.session_state.progress_cache = {}
+
+
+def get_cached_user_history(repo, user_id: str, limit: int = 200, ttl_seconds: int = 30) -> list:
+    """Get user history with caching to avoid repeated Firestore queries.
+    
+    Cache is invalidated after ttl_seconds or when explicitly cleared.
+    """
+    cache_key = f"{user_id}|{limit}"
+    now = time.time()
+    
+    if cache_key in st.session_state.user_history_cache:
+        history, cached_at = st.session_state.user_history_cache[cache_key]
+        if now - cached_at < ttl_seconds:
+            return history
+    
+    # Cache miss or expired - fetch from Firestore
+    history = repo.get_user_history(user_id, limit=limit)
+    st.session_state.user_history_cache[cache_key] = (history, now)
+    return history
+
+
+def get_cached_user_counters(repo, user_id: str, ttl_seconds: int = 30) -> dict:
+    """Get user counters with caching to avoid repeated Firestore queries.
+    
+    Returns dict with 'confirmed', 'to_review', 'processed' keys.
+    Cache is invalidated after ttl_seconds or when explicitly cleared.
+    """
+    cache_key = user_id
+    now = time.time()
+    
+    if cache_key in st.session_state.user_counters_cache:
+        counters, cached_at = st.session_state.user_counters_cache[cache_key]
+        if now - cached_at < ttl_seconds:
+            return counters
+    
+    # Cache miss or expired - fetch from Firestore
+    try:
+        user_doc_raw = repo.users.document(user_id).get().to_dict() or {}
+        counters = {
+            "confirmed": user_doc_raw.get("images_confirmed", 0),
+            "to_review": user_doc_raw.get("images_to_review", 0),
+            "processed": user_doc_raw.get("images_processed", 0),
+        }
+        st.session_state.user_counters_cache[cache_key] = (counters, now)
+        return counters
+    except Exception as e:
+        print(f"Warning: Could not fetch user counters: {e}")
+        return {"confirmed": 0, "to_review": 0, "processed": 0}
+
+
+def invalidate_user_caches(user_id: str) -> None:
+    """Invalidate all caches for a specific user (call after save/confirm operations)."""
+    # Remove history caches for this user
+    keys_to_remove = [k for k in st.session_state.user_history_cache if k.startswith(f"{user_id}|")]
+    for k in keys_to_remove:
+        del st.session_state.user_history_cache[k]
+    
+    # Remove counter cache for this user
+    if user_id in st.session_state.user_counters_cache:
+        del st.session_state.user_counters_cache[user_id]
+    
+    # Clear progress cache (image positions may have changed)
+    st.session_state.progress_cache = {}
 
 
 def build_complete_ui_state() -> dict:
@@ -970,11 +1043,17 @@ def main() -> None:  # noqa: C901
     cache_entry = st.session_state.task_cache
 
     # ------------------------------------------------------------------
-    # Resolve image URL (cached)
+    # Resolve image URL (cached + prefetched)
     # ------------------------------------------------------------------
     resolved_url: str | None = None
     resolved_ttl_seconds = 3600  # 1 hour TTL for signed URLs
-    if cache_entry.get('current_image_id') == task['image_id']:
+    
+    # Check prefetch cache first (fastest)
+    if task['image_id'] in st.session_state.prefetch_urls:
+        resolved_url = st.session_state.prefetch_urls[task['image_id']]
+        logger.info(f"[PREFETCH] Using prefetched URL for {task['image_id']}")
+    # Then check task cache
+    elif cache_entry.get('current_image_id') == task['image_id']:
         # Only reuse cached resolved URL if still fresh
         ts = cache_entry.get('resolved_url_ts') or 0
         if ts and (time.time() - ts) < resolved_ttl_seconds:
@@ -982,15 +1061,22 @@ def main() -> None:  # noqa: C901
 
     if resolved_url is None:
         try:
+            # get_image_url now checks Firestore cache and stores resolved URLs
             resolved_url = repo.get_image_url(task)
             cache_entry['resolved_url'] = resolved_url
             cache_entry['resolved_url_ts'] = time.time()
             logger.info(f"[CACHE] Stored resolved URL for {task['image_id']}")
         except Exception as e:
-            logger.warning(f"API resolver failed: {e}")
-            # Invalidate any stale cached value to force fallback
+            logger.warning(f"[RESOLVER] API resolver failed: {e}")
+            # Invalidate any stale cached values to force fallback to image_url
             cache_entry['resolved_url'] = None
             cache_entry['resolved_url_ts'] = None
+            cache_entry['simple_url'] = None
+            cache_entry['display_mode'] = None
+            # Remove from prefetch cache if present (might be stale)
+            if task['image_id'] in st.session_state.prefetch_urls:
+                del st.session_state.prefetch_urls[task['image_id']]
+            logger.info(f"[FALLBACK] Will attempt to use raw image_url for {task['image_id']}")
 
     # Candidate sources (resolved URL first, fallback to raw image_url)
     image_sources: list[tuple[str, str]] = []
@@ -1094,18 +1180,12 @@ def main() -> None:  # noqa: C901
         
         st.stop()  # Don't proceed with the rest of the app
 
-    # Fetch user counters for header display (optional - don't break header if this fails)
+    # Fetch user counters for header display (cached to avoid Firestore query on every rerun)
     counters = None
     try:
         # In admin/qa-editor review modes, show counters for the target labeler
         counters_user = review_target_user if (is_admin_review or is_editor_review) else st.session_state.username
-        # Pass the transaction to the get() call to ensure data consistency
-        user_doc_raw = repo.users.document(counters_user).get().to_dict() or {}
-        counters = {
-            "confirmed": user_doc_raw.get("images_confirmed", 0),
-            "to_review": user_doc_raw.get("images_to_review", 0),
-            "processed": user_doc_raw.get("images_processed", 0),
-        }
+        counters = get_cached_user_counters(repo, counters_user, ttl_seconds=30)
     except Exception as e:
         # Log the error but don't break the header
         print(f"Warning: Could not fetch user counters: {e}")
@@ -1126,9 +1206,9 @@ def main() -> None:  # noqa: C901
                 progress_current = st.session_state.progress_cache[cache_key]
             else:
                 if task.get("status") == "labeled" and progress_total > 0:
-                    # Fetch just enough history to find the current image
+                    # Fetch history with caching to find the current image position
                     try:
-                        hist = repo.get_user_history(history_user, limit=max(1, progress_total))
+                        hist = get_cached_user_history(repo, history_user, limit=max(1, progress_total), ttl_seconds=30)
                         current_idx = None
                         for idx, entry in enumerate(hist):
                             if entry.get("image_id") == task.get("image_id"):
@@ -1170,40 +1250,106 @@ def main() -> None:  # noqa: C901
 
     # Lightweight prefetch of next image URL (and labels in editor) – non-blocking best-effort
     try:
-        # Only prefetch when we have a current image and a repo method exists
-        next_task_hint = None
+        # Prefetch next 2-3 images to eliminate resolver latency on navigation
+        next_image_ids = []
+        
         if is_admin_review and task:
-            next_task_hint = repo.get_next_review_task(review_target_user, after_image_id=task["image_id"])  # type: ignore[attr-defined]
-        elif is_editor_review and task:
-            next_task_hint = repo.get_next_editor_task(review_target_user, after_image_id=task["image_id"])  # type: ignore[attr-defined]
-        elif task and task.get("status") == "labeled":
-            # For labelers browsing history, prefetch next labeled image if any
+            # Get next 3 review images
             try:
-                hist = repo.get_user_history(st.session_state.username, limit=50)
-                for idx, entry in enumerate(hist):
-                    if entry.get("image_id") == task.get("image_id") and idx > 0:
-                        next_task_hint = {"image_id": hist[idx-1].get("image_id")}
+                current_id = task["image_id"]
+                for _ in range(3):
+                    next_task = repo.get_next_review_task(review_target_user, after_image_id=current_id)  # type: ignore[attr-defined]
+                    if next_task and next_task.get("image_id"):
+                        next_image_ids.append(next_task["image_id"])
+                        current_id = next_task["image_id"]
+                    else:
                         break
             except Exception:
                 pass
-        if next_task_hint and next_task_hint.get("image_id"):
-            nid = next_task_hint["image_id"]
-            if nid not in st.session_state.prefetch_urls:
+        elif is_editor_review and task:
+            # Get next 3 editor images
+            try:
+                current_id = task["image_id"]
+                for _ in range(3):
+                    next_task = repo.get_next_editor_task(review_target_user, after_image_id=current_id)  # type: ignore[attr-defined]
+                    if next_task and next_task.get("image_id"):
+                        next_image_ids.append(next_task["image_id"])
+                        current_id = next_task["image_id"]
+                    else:
+                        break
+            except Exception:
+                pass
+        elif task and task.get("status") == "labeled":
+            # For labelers browsing history, prefetch next 3 labeled images
+            try:
+                hist = get_cached_user_history(repo, st.session_state.username, limit=50)
+                for idx, entry in enumerate(hist):
+                    if entry.get("image_id") == task.get("image_id"):
+                        # Get next 3 images in history (earlier indices = newer)
+                        for offset in range(1, min(4, idx + 1)):
+                            if idx - offset >= 0:
+                                next_image_ids.append(hist[idx - offset].get("image_id"))
+                        break
+            except Exception:
+                pass
+        
+        # Batch prefetch URLs for images not yet cached
+        if next_image_ids:
+            uncached_ids = [nid for nid in next_image_ids if nid not in st.session_state.prefetch_urls]
+            if uncached_ids:
                 try:
-                    ndoc = repo.get_image_doc(nid) or {}
-                    # Resolve signed URL with a short timeout via repo.get_image_url
-                    url = repo.get_image_url(ndoc)
-                    st.session_state.prefetch_urls[nid] = url
-                except Exception:
-                    # Best-effort; ignore failures
-                    pass
+                    # Get image documents for batch resolution
+                    bb_urls_to_resolve = []
+                    id_to_bburl = {}
+                    for nid in uncached_ids:
+                        ndoc = repo.get_image_doc(nid)
+                        if ndoc and ndoc.get("bb_url"):
+                            # Check if Firestore already has cached URL
+                            cached_url = ndoc.get("cached_signed_url")
+                            cached_ts = ndoc.get("cached_signed_url_ts")
+                            if cached_url and cached_ts:
+                                from datetime import datetime, timedelta
+                                now = datetime.utcnow()
+                                if hasattr(cached_ts, 'timestamp'):
+                                    cached_dt = datetime.utcfromtimestamp(cached_ts.timestamp())
+                                else:
+                                    cached_dt = cached_ts
+                                age = now - cached_dt
+                                if age < timedelta(hours=23):
+                                    st.session_state.prefetch_urls[nid] = cached_url
+                                    continue
+                            
+                            # Need to resolve this one
+                            bb_urls_to_resolve.append(ndoc["bb_url"])
+                            id_to_bburl[nid] = ndoc["bb_url"]
+                    
+                    # Batch resolve if needed
+                    if bb_urls_to_resolve:
+                        from labeler_backend.bb_resolver import resolve_bb_paths_batch
+                        resolved_map = resolve_bb_paths_batch(bb_urls_to_resolve)
+                        for nid, bb_url in id_to_bburl.items():
+                            if bb_url in resolved_map:
+                                st.session_state.prefetch_urls[nid] = resolved_map[bb_url]
+                                # Store in Firestore for future use (async, best-effort)
+                                try:
+                                    repo.images.document(nid).update({
+                                        "cached_signed_url": resolved_map[bb_url],
+                                        "cached_signed_url_ts": firestore.SERVER_TIMESTAMP,
+                                    })
+                                except Exception:
+                                    pass
+                        print(f"[PREFETCH] Batch resolved {len(resolved_map)} URLs for upcoming images")
+                except Exception as e:
+                    print(f"[PREFETCH] Batch prefetch failed: {e}")
+            
             # Prefetch labels for QA editor (read-only cache)
             if is_editor_review:
                 try:
                     pre_labels_cache = st.session_state.get("prefetch_labels", {})
-                    if nid not in pre_labels_cache:
-                        pre_labels_cache[nid] = repo.load_labels(nid) or {}
-                        st.session_state.prefetch_labels = pre_labels_cache
+                    for nid in next_image_ids:
+                        if nid not in pre_labels_cache:
+                            pre_labels_cache[nid] = repo.load_labels(nid) or {}
+                    st.session_state.prefetch_labels = pre_labels_cache
                 except Exception:
                     pass
     except Exception:
@@ -1332,6 +1478,8 @@ def main() -> None:  # noqa: C901
         with col_c:
             if st.button("✅ Confirm", type="primary", use_container_width=True):
                 repo.confirm_labels(task["image_id"], st.session_state.username)
+                # Invalidate caches for the labeler whose work was confirmed
+                invalidate_user_caches(review_target_user)
                 # Visual confirmation for the reviewer
                 try:
                     st.toast("✅ Labels confirmed", icon="✅")  # Streamlit ≥1.27
@@ -1348,6 +1496,8 @@ def main() -> None:  # noqa: C901
         with col_r:
             if st.button("↩️ Needs changes", use_container_width=True):
                 repo.request_revision(task["image_id"], review_target_user, st.session_state.username, fb_input)
+                # Invalidate caches for the labeler who needs to revise
+                invalidate_user_caches(review_target_user)
                 # Visual confirmation for the reviewer
                 try:
                     st.toast("↩️ Revision requested", icon="✍️")
@@ -2142,6 +2292,8 @@ def main() -> None:  # noqa: C901
                 repo.save_labels(task["image_id"], payload, st.session_state.username)
                 print(f"[APP DEBUG] repo.save_labels completed successfully")
                 update_cache_with_saved_data(task["image_id"], payload)
+                # Invalidate user caches since counters/history changed
+                invalidate_user_caches(st.session_state.username)
                 # Mark as labeled for downstream logic
                 task["status"] = "labeled"
                 # Also update qa_status to match what happens in the backend

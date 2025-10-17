@@ -292,15 +292,60 @@ class FirestoreRepo(LabelRepo):
     # Helper
     # ------------------------------------------------------------------
     def get_image_url(self, image_doc: Dict) -> str:  # type: ignore[override]
+        """Get signed URL for image, using cached value if still fresh.
+        
+        Raises BackblazeResolverError if resolution fails (caught by caller for fallback).
+        """
+        image_id = image_doc.get("image_id")
         bb_url = image_doc.get("bb_url")
+        
         if not bb_url:
+            # If no bb_url, let caller fall back to image_url
             raise BackblazeResolverError(
                 f"Missing or empty bb_url in document. Document keys: {list(image_doc.keys())}, "
                 f"bb_url value: {repr(bb_url)}"
             )
         
-        # Use only the bb_url resolver, no fallback
-        return self._resolve(bb_url)  # type: ignore[index]
+        # Check if we have a fresh cached signed URL (24-hour TTL)
+        cached_url = image_doc.get("cached_signed_url")
+        cached_ts = image_doc.get("cached_signed_url_ts")
+        
+        if cached_url and cached_ts:
+            # Check if cached URL is still fresh (within 23 hours to be safe)
+            from datetime import datetime, timedelta
+            now = datetime.utcnow()
+            # Handle Firestore Timestamp objects
+            if hasattr(cached_ts, 'timestamp'):
+                cached_dt = datetime.utcfromtimestamp(cached_ts.timestamp())
+            else:
+                cached_dt = cached_ts
+            
+            age = now - cached_dt
+            if age < timedelta(hours=23):
+                print(f"[CACHE] Using cached signed URL for {image_id} (age: {age})")
+                return cached_url
+        
+        # Cache miss or expired - resolve and store
+        # If resolver fails, exception will be caught by caller for fallback to image_url
+        try:
+            resolved_url = self._resolve(bb_url)  # type: ignore[index]
+            
+            # Store in Firestore for future use (async, don't block on failure)
+            if image_id:
+                try:
+                    self.images.document(image_id).update({
+                        "cached_signed_url": resolved_url,
+                        "cached_signed_url_ts": firestore.SERVER_TIMESTAMP,
+                    })
+                    print(f"[CACHE] Stored signed URL in Firestore for {image_id}")
+                except Exception as e:
+                    print(f"[CACHE] Failed to store signed URL: {e}")
+            
+            return resolved_url
+        except Exception as e:
+            # Resolver failed - let caller fall back to image_url
+            print(f"[RESOLVER] Failed to resolve {bb_url}: {e}")
+            raise BackblazeResolverError(f"Resolver failed for {bb_url}: {e}") from e
 
     # ------------------------------------------------------------------
     # User history

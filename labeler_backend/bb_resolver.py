@@ -16,9 +16,50 @@ class BackblazeResolverError(RuntimeError):
     """Raised when fetching a signed URL fails."""
 
 
-def resolve_bb_path(bb_url: str, endpoint: str | None = None) -> str:
-    """Return a public URL for *bb_url* using the Cloud Run resolver service."""
+def resolve_bb_paths_batch(bb_urls: list[str], endpoint: str | None = None) -> dict[str, str]:
+    """Resolve multiple bb_urls in a single API call.
+    
+    Returns dict mapping bb_url -> signed_url.
+    Raises BackblazeResolverError if the request fails.
+    """
+    ep = endpoint or ENDPOINT
+    if not ep:
+        raise BackblazeResolverError(f"BB_RESOLVER_ENDPOINT is empty or not set.")
+    
+    if not bb_urls:
+        return {}
+    
+    try:
+        print(f"DEBUG: Batch resolving {len(bb_urls)} bb_urls")
+        r = requests.post(ep, json={"row_prefixes": bb_urls}, timeout=15)
+        r.raise_for_status()
+        data: Any = r.json()
+        
+        result = {}
+        if "images" in data and data["images"]:
+            # API returns: {"images": [{"row_prefix": "...", "signed_urls": ["url"]}, ...]}
+            for img in data["images"]:
+                row_prefix = img.get("row_prefix")
+                signed_urls = img.get("signed_urls", [])
+                if row_prefix and signed_urls:
+                    result[row_prefix] = signed_urls[0]
+        elif "signed_urls" in data:
+            # Fallback for old API format: {"signed_urls": {"path": "url", ...}}
+            result = data["signed_urls"]
+        else:
+            raise BackblazeResolverError(f"Unexpected API response structure: {data}")
+        
+        print(f"DEBUG: Batch resolved {len(result)} URLs")
+        return result
+    except Exception as exc:  # noqa: BLE001
+        raise BackblazeResolverError(f"Batch resolve failed: {exc}") from exc
 
+
+def resolve_bb_path(bb_url: str, endpoint: str | None = None) -> str:
+    """Return a public URL for *bb_url* using the Cloud Run resolver service.
+    
+    For single URL resolution. For multiple URLs, use resolve_bb_paths_batch() instead.
+    """
     ep = endpoint or ENDPOINT
     if not ep:
         raise BackblazeResolverError(f"BB_RESOLVER_ENDPOINT is empty or not set. Please check your environment configuration.")
